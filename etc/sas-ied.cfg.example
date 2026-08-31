@@ -80,18 +80,30 @@
       },
       sbo = { timeoutSec = 30 },
     },
-    -- Bus voltage, read from a Create: Electro-Energistics meter block's
-    -- OC component bridge. NOTE: confirm the real method name in-game
-    -- (e.g. print each name from component.proxy(addr).getMethods()) --
-    -- "getVoltage" here is a placeholder, not a verified API call.
+    -- Bus voltage and feeder current, each read from its own physical
+    -- Create: Electro-Energistics gauge block (a voltmeter block and an
+    -- ammeter block -- two separate blocks, NOT one block queried two
+    -- ways). Each requires its own OpenComputers Adapter block placed
+    -- against it -- Create:EE's gauge only exposes a ComputerCraft
+    -- peripheral (verified against the mod's actual source, see
+    -- sas/io/meter.lua's header), and the Adapter is what turns that into
+    -- an OC component at all. Both blocks expose the SAME method name,
+    -- "getValue" -- which quantity comes back depends on which physical
+    -- block that address's Adapter face is touching, not on the method
+    -- name. Find each address with `component.list()` after placing the
+    -- Adapter; confirm with `component.proxy(addr).getMethods()`.
+    --
+    -- Operational caveat: getValue() also bakes in that specific gauge
+    -- block's own in-world display-scale dial (its scroll-value UI) --
+    -- set each gauge's scale to match what `deadband` below assumes (base
+    -- units), since the scale can't be read or overridden from OC.
     {
       ln = "MMXU1", doName = "Vol", type = "MV", goose = true, deadband = 2.0,
-      io = { kind = "meter", address = "<createee-meter-component-address>", method = "getVoltage" },
+      io = { kind = "meter", address = "<createee-voltmeter-adapter-address>", method = "getValue" },
     },
-    -- Feeder current, same caveat on the method name.
     {
       ln = "MMXU1", doName = "Amp", type = "MV", goose = true, deadband = 0.5,
-      io = { kind = "meter", address = "<createee-meter-component-address>", method = "getCurrent" },
+      io = { kind = "meter", address = "<createee-ammeter-adapter-address>", method = "getValue" },
     },
     -- A spare generic status indicator (GGIO), simple on/off input.
     {

@@ -1,16 +1,35 @@
 -- sas.io.meter: analog measurement binding for Create: Electro-Energistics
--- meter blocks (voltmeters/ammeters), read via their OpenComputers
--- component bridge.
+-- meter blocks (voltmeters/ammeters), read via an OpenComputers Adapter
+-- block bridging the block's ComputerCraft peripheral onto the OC
+-- component network.
 --
--- RISK / ASSUMPTION, flagged per the implementation plan: the exact OC
--- component method name(s) Create: Electro-Energistics exposes for
--- reading a meter's value cannot be verified outside the actual mod/game.
--- The binding is therefore deliberately generic -- `address` (component
--- address) and `method` (method name string) both come from
--- /etc/sas-ied.cfg, not hardcoded here -- so confirming the real method
--- name in-game (e.g. by printing component.proxy(addr).getMethods()) is a
--- one-line config edit, not a code change. See etc/sas-ied.cfg.example
--- for the config shape.
+-- Verified against the mod's actual source
+-- (github.com/george8188625/Create-Electro-Energetics, commit
+-- 6f8adef55242dc5169639c314272ee66027cba0d):
+-- compat/computercraft/peripherals/ElectricGaugePeripheral.java exposes
+-- gauge readings ONLY via ComputerCraft's peripheral API (SyncedPeripheral
+-- + dan200.computercraft.api.lua.LuaFunction) -- there is no
+-- OpenComputers-native package anywhere in that repo. Reaching it from OC
+-- therefore requires an OpenComputers **Adapter** block placed against the
+-- physical voltmeter/ammeter block; verified this bridge mechanism against
+-- OpenComputers' own source (li.cil.oc.integration.computercraft.DriverPeripheral):
+-- the Adapter creates one OC component per attached CC peripheral, whose
+-- methods() is exactly the peripheral's own getMethodNames() and whose
+-- invoke() forwards straight to the peripheral's callMethod() -- so
+-- component.invoke(address, method) below really does call the CC
+-- peripheral's Lua function verbatim, once the Adapter is in place.
+--
+-- The mod exposes a SINGLE shared method, getValue(), for BOTH voltmeter
+-- and ammeter blocks -- which quantity it returns depends on the physical
+-- block itself, not on the method name -- so a voltmeter and an ammeter
+-- are two separate Adapter-bridged addresses both called with
+-- method = "getValue", not two methods on one shared address. getValue()
+-- also bakes in that block's own in-world display-scale dial
+-- (ElectricGaugeBlockEntity.scaling) -- see etc/sas-ied.cfg.example for
+-- the full config shape and that operational caveat. This was verified
+-- against OpenComputers' mainline bridge source, not by running it
+-- in-game -- spot-check component.list()/component.proxy(addr).getMethods()
+-- against your actual modpack's OpenComputers build before relying on it.
 local component = require("component")
 
 local meter = {}

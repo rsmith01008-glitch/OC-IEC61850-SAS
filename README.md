@@ -45,7 +45,9 @@ peer-to-peer interlocking (see below) needs no involvement from SCADA.
   config-driven program. Behavior is entirely defined by
   `/etc/sas-ied.cfg` -- logical device name, and a list of logical-node
   data-object points (breaker/switch status & control via redstone,
-  analog measurements via Create: Electro-Energistics meter blocks). Same
+  analog measurements via Create: Electro-Energistics meter blocks, each
+  reached through an OpenComputers Adapter block since the mod only
+  exposes a ComputerCraft peripheral -- see `sas/io/meter.lua`). Same
   program image runs on every IED; only the config differs. Also
   subscribes to the shared GOOSE multicast group to track peer-published
   points, for locally evaluated `interlocks` (see below) -- not just to
@@ -171,11 +173,17 @@ same as before).
 
 ## Known limitations / risks
 
-- **Create: Electro-Energistics meter method names** (`sas/io/meter.lua`,
-  `io.method` in `sas-ied.cfg`) are placeholders (`getVoltage`/
-  `getCurrent`) -- confirm the real OC component method names in-game
-  (e.g. `component.proxy(addr).getMethods()`) before relying on analog
-  readings.
+- **Create: Electro-Energistics meter binding** (`sas/io/meter.lua`,
+  `sas-ied.cfg`'s `MMXU1.Vol`/`MMXU1.Amp` points) is no longer a
+  placeholder guess -- verified against the mod's actual source (single
+  shared `getValue()` method, quantity determined by the physical block)
+  and against OpenComputers' own Adapter bridge source (an Adapter block
+  is required, since the mod only exposes a ComputerCraft peripheral).
+  See `sas/io/meter.lua`'s header for the full citation. Residual risk:
+  verified against source, not by running it in-game -- spot-check
+  `component.list()`/`component.proxy(addr).getMethods()` against your
+  actual modpack's OpenComputers build, and set each gauge's in-world
+  scale dial to match the configured `deadband`.
 - **`ipstackd`-under-MineOS compatibility** and two cosmetic MineOS
   details (`Icon.pic` format, exact title bar height) -- see above. The
   MineOS GUI API calls themselves are no longer a guess (cross-checked
