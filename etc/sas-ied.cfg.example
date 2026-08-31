@@ -1,0 +1,93 @@
+-- OC-IEC61850-SAS IED configuration.
+--
+-- Copy this file to /etc/sas-ied.cfg and edit it. This is a plain Lua
+-- table literal read with serialization.unserialize, so it must stay
+-- valid Lua syntax -- comments are fine, but every value needs a trailing
+-- comma or correct table syntax. Any key you omit falls back to the
+-- built-in defaults in sas/ied/engine.lua. Restart after editing:
+-- rc iedd restart
+--
+-- Requires ipstackd (OC-IP-Stack) already configured and running on this
+-- machine -- see /etc/ipstack.cfg.example. iedd will refuse to start if
+-- ipstackd is not running.
+{
+  -- Must match this IED's `name` entry in every SCADA that talks to it
+  -- (sas-scada.cfg's `ieds` list) -- used both to build fully-qualified
+  -- point references and to stamp published GOOSE datagrams.
+  iedName = "IED-BRK1",
+
+  -- IEC 61850-style logical device name for this IED.
+  logicalDevice = "LD0",
+
+  -- MMS-lite TCP server port (get-model/read/subscribe/select/operate/...).
+  mms = { port = 8102 },
+
+  goose = {
+    port = 8104,
+    -- GOOSE has no multicast in this stack (OC-IP-Stack has no
+    -- broadcast/multicast address concept) -- list every peer that should
+    -- receive this IED's GOOSE publications by "subnet.host" address.
+    -- Typically the SCADA node, and/or peer IEDs for direct interlocks.
+    peers = {
+      -- "1.1",  -- SCADA
+    },
+    -- Fast retransmit burst (seconds after each real dataset change)...
+    burstIntervalsSec = { 0.2, 0.5, 1, 2 },
+    -- ...then settle to this steady heartbeat for liveness.
+    heartbeatSec = 5,
+  },
+
+  -- How often the engine tick runs: I/O polling, connection servicing,
+  -- SBO/pulse housekeeping.
+  tickIntervalSec = 0.2,
+
+  -- Even with no real change, every point is re-reported/re-published at
+  -- least this often, so a subscriber can never silently go stale on a
+  -- genuinely static plant.
+  integritySec = 30,
+
+  points = {
+    -- Breaker position status (double point: open/closed/intermediate/bad),
+    -- read from two redstone inputs (e.g. limit switches).
+    {
+      ln = "XCBR1", doName = "Pos", type = "DPS", goose = true,
+      io = {
+        kind = "redstone",
+        address = "<redstone-component-address>",
+        openSide = 0,   -- sides.bottom
+        closedSide = 1, -- sides.top
+      },
+    },
+    -- Breaker control (double point control: operate open/closed), pulses
+    -- one of two distinct redstone outputs (trip coil / close coil).
+    {
+      ln = "XCBR1", doName = "Pos", type = "DPC", goose = false,
+      io = {
+        kind = "redstone",
+        address = "<redstone-component-address>",
+        tripSide = 2,   -- sides.back
+        closeSide = 3,  -- sides.front
+        pulseMs = 250,
+      },
+      sbo = { timeoutSec = 30 },
+    },
+    -- Bus voltage, read from a Create: Electro-Energistics meter block's
+    -- OC component bridge. NOTE: confirm the real method name in-game
+    -- (e.g. print each name from component.proxy(addr).getMethods()) --
+    -- "getVoltage" here is a placeholder, not a verified API call.
+    {
+      ln = "MMXU1", doName = "Vol", type = "MV", goose = true, deadband = 2.0,
+      io = { kind = "meter", address = "<createee-meter-component-address>", method = "getVoltage" },
+    },
+    -- Feeder current, same caveat on the method name.
+    {
+      ln = "MMXU1", doName = "Amp", type = "MV", goose = true, deadband = 0.5,
+      io = { kind = "meter", address = "<createee-meter-component-address>", method = "getCurrent" },
+    },
+    -- A spare generic status indicator (GGIO), simple on/off input.
+    {
+      ln = "GGIO1", doName = "Ind1", type = "SPS", goose = false,
+      io = { kind = "redstone", address = "<redstone-component-address>", side = 4, onLevel = 1 },
+    },
+  },
+}
