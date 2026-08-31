@@ -98,26 +98,43 @@ Inspect a running `iedd`/`scadad` with `sas-ctl <status|points|alarms|log [n]>`
 
 ## Install (MineOS: HMI node)
 
-Copy `mineos/SAS-HMI.app/` into MineOS's Applications folder on the HMI
-machine, and `sas/`, `sas/proto/`, `sas/sbo.lua`, `sas/model.lua`,
-`sas/config.lua`, `sas/util.lua` alongside it somewhere MineOS's `require()`
-can resolve (oppm can't install into a MineOS filesystem, so this is a
-manual copy, not `oppm install`). Copy `etc/sas-hmi.cfg.example` to
-`/etc/sas-hmi.cfg` and edit it (SCADA address/port, operator name).
+Copy `mineos/SAS-HMI.app/` into MineOS's `Applications` folder on the HMI
+machine (per MineOS's own docs, an application is just a `.app` directory
+containing `Main.lua` plus an optional `Icon.pic` -- see
+`mineos/SAS-HMI.app/ICON_NOTE.txt`), and `sas/`, `sas/proto/`,
+`sas/sbo.lua`, `sas/model.lua`, `sas/config.lua`, `sas/util.lua` alongside
+it somewhere MineOS's `require()` can resolve (oppm can't install into a
+MineOS filesystem, so this is a manual copy, not `oppm install`). Copy
+`etc/sas-hmi.cfg.example` to `/etc/sas-hmi.cfg` and edit it (SCADA
+address/port, operator name).
+
+`mineos/SAS-HMI.app/Main.lua`'s `GUI.*`/`system.*`/`event.*` calls
+(`system.addWindow`, `GUI.titledWindow`, `GUI.addBackgroundContainer`,
+`event.addHandler`, `object:remove()`, etc.) have been cross-checked
+against MineOS's actual wiki
+(`github.com/IgorTimofeev/MineOS.wiki`, `System-API.md`/`GUI-API.md`/
+`Event-API.md`) -- not guessed, as an earlier version of this file was.
+That verification also caught and fixed a bug that would have broken the
+app outright: creating a second top-level `GUI.workspace()` and calling
+`workspace:start()` conflicts with MineOS's own already-running desktop
+event loop; the app now adds a window into MineOS's existing shared
+workspace (`system.addWindow`) and registers its network-poll callback via
+MineOS's own `event.addHandler`, matching the pattern in `System-API.md`'s
+own MineOS-integration example. Two details remain genuinely unverified
+since the wiki doesn't document them: `Icon.pic`'s exact pixel
+format/dimensions, and the title bar's exact height in rows (`Main.lua`'s
+`TITLE_HEIGHT` is an approximation) -- both cosmetic, not structural.
 
 **Known risk:** whether OC-IP-Stack's `ipstackd`/`require("ipstack.socket")`
 runs cleanly under MineOS (a distinct OS from OpenOS, with its own
-filesystem/event/window-manager implementation) is unverified from this
-development environment. Per direction, the HMI is built assuming it works
-the same way it does under OpenOS/SCADA; verify this on first real
-deployment. If it does not port cleanly, the fallback is a small headless
-OpenOS "gateway" machine running `ipstackd` + a thin bridge, networked to
-the MineOS machine, so the HMI's `sas/proto/mmsclient.lua` and
-`sas/model.lua` code needs no changes -- only the transport glue moves.
-Likewise, `mineos/SAS-HMI.app/Main.lua`'s `GUI.*`/`workspace:*` calls are
-written to the best-effort publicly documented shape of MineOS's `GUI`
-library and should be confirmed/adjusted against a real MineOS install
-before relying on this HMI.
+filesystem/kernel implementation) is unverified from this development
+environment -- this is a transport-layer question, unrelated to the GUI
+API points above. Per direction, the HMI is built assuming it works the
+same way it does under OpenOS/SCADA; verify this on first real deployment.
+If it does not port cleanly, the fallback is a small headless OpenOS
+"gateway" machine running `ipstackd` + a thin bridge, networked to the
+MineOS machine, so the HMI's `sas/proto/mmsclient.lua` and `sas/model.lua`
+code needs no changes -- only the transport glue moves.
 
 ## Protocol summary
 
@@ -159,8 +176,11 @@ same as before).
   `getCurrent`) -- confirm the real OC component method names in-game
   (e.g. `component.proxy(addr).getMethods()`) before relying on analog
   readings.
-- **MineOS GUI API and OC-IP-Stack-under-MineOS compatibility** -- see
-  above.
+- **`ipstackd`-under-MineOS compatibility** and two cosmetic MineOS
+  details (`Icon.pic` format, exact title bar height) -- see above. The
+  MineOS GUI API calls themselves are no longer a guess (cross-checked
+  against MineOS's actual wiki), only whether they've been run against a
+  real MineOS install (see Testing below).
 - Everything else (protocol, data model, control flow, redstone I/O) was
   validated by direct code review against OC-IP-Stack's actual source, not
   its README alone, but none of it has been run inside the actual mod --

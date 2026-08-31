@@ -1,7 +1,0 @@
-Placeholder: MineOS application icons use a MineOS-specific ".pic" format
-(rendered by MineOS's own image/icon decoder), which cannot be produced or
-verified outside a real MineOS environment. Create Resources/icon.pic with
-MineOS's own icon/image tooling once you have a real MineOS install to work
-from, then point About.lua's `icon` field at it (already set to
-"Resources/icon.pic"). Until then, MineOS should fall back to a default
-icon for this application.

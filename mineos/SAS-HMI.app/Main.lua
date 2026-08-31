@@ -1,16 +1,23 @@
--- SAS HMI -- MineOS application entry point.
+-- SAS HMI -- MineOS application entry point. IEC 61850-style substation
+-- automation HMI: mimic diagram, select-before-operate control, alarm
+-- panel, talking to an OC-IEC61850-SAS SCADA node over MMS-lite.
 --
--- IMPORTANT, read before touching this file: the exact MineOS GUI/window-
--- manager/event-loop calls below (GUI.workspace(), GUI.panel(), GUI.button(),
--- workspace:start(), etc.) are written to the best-effort, publicly known
--- shape of MineOS's "GUI" library, but have NOT been verified against a
--- real MineOS install from this environment -- see the "MineOS risk" note
--- in README.md. Everything else in this file (the SCADA protocol client,
--- the SBO flow, the data model) reuses sas/proto/*, sas/model.lua and
--- sas/sbo.lua unchanged from the OpenOS-side SCADA/IED code, and does NOT
--- need to change even if the GUI calls do. If GUI.* calls turn out wrong,
--- fix them here and only here.
+-- The GUI/window-manager/event-loop calls below are cross-checked against
+-- MineOS's actual documentation (github.com/IgorTimofeev/MineOS.wiki),
+-- specifically System-API.md ("How to develop MineOS applications?" and
+-- system.addWindow's example), Event-API.md (event.addHandler), and
+-- GUI-API.md (object/container/button/text/window/addBackgroundContainer
+-- sections) -- not guessed. Two things remain genuinely unverified since
+-- they aren't in the wiki: Icon.pic's exact pixel format/dimensions (see
+-- ICON_NOTE.txt), and whether ipstackd/require("ipstack.socket") itself
+-- runs under MineOS at all (a transport-layer question, unrelated to the
+-- GUI calls here -- see the MineOS risk note in README.md).
+--
+-- Everything below that ISN'T a GUI/event-loop call (the SCADA protocol
+-- client, the SBO flow, the data model) reuses sas/proto/*, sas/model.lua
+-- and sas/sbo.lua unchanged from the OpenOS-side SCADA/IED code.
 local GUI = require("GUI")
+local system = require("System")
 local event = require("event")
 
 local config = require("sas.config")
@@ -31,25 +38,42 @@ local cfg = config.load(CFG_PATH, DEFAULTS)
 
 local app = {
   client = nil,           -- sas.proto.mmsclient.Client, once connected
-  points = {},            -- [fullRef] = { ln, doName, type, value, quality, t, widget= }
+  points = {},            -- [fullRef] = { ln, doName, type, value, quality, t, widget=, layoutX=, layoutY= }
   alarms = {},            -- array of alarm records (from the last alarm-update/alarm-list-reply)
-  pending = {},            -- [fullRef] = { token=, expiresAt= } -- our own outstanding SBO selections
+  pending = {},            -- [fullRef] = { token= } -- our own outstanding SBO selections
+  dialog = nil,
 }
 
 --- GUI construction ------------------------------------------------------------
 
-local workspace = GUI.workspace()
-local screenWidth, screenHeight = workspace.width, workspace.height
+-- Per System-API.md's own MineOS-integration example, an application adds
+-- a window to the OS's existing shared workspace (system.addWindow) --
+-- it does NOT create its own top-level GUI.workspace(). system.getWorkspace()
+-- first just to read screen dimensions before the window can be sized.
+local sizingWorkspace = system.getWorkspace()
+local WIN_WIDTH = math.min(100, sizingWorkspace.width - 4)
+local WIN_HEIGHT = math.min(35, sizingWorkspace.height - 4)
+-- Approximate MineOS titled-window header height (title bar + separator);
+-- the wiki doesn't give an exact figure -- verify/adjust against a real
+-- MineOS install.
+local TITLE_HEIGHT = 3
 
-local mainContainer = workspace:addChild(GUI.container(1, 1, screenWidth, screenHeight))
+local workspace, window = system.addWindow(GUI.titledWindow(1, 1, WIN_WIDTH, WIN_HEIGHT, "SAS HMI", true))
 
-local statusText = mainContainer:addChild(GUI.text(2, 1, 0xFFFFFF,
+local contentX, contentWidth = 2, WIN_WIDTH - 2
+local statusY = TITLE_HEIGHT + 1
+local mimicY = statusY + 2
+local mimicHeight = WIN_HEIGHT - mimicY - 9
+
+local statusText = window:addChild(GUI.text(contentX, statusY, 0xFFFFFF,
   "SAS HMI -- connecting to " .. cfg.scada.ip .. ":" .. cfg.scada.port .. " ..."))
 
-local mimicPanel = mainContainer:addChild(GUI.container(2, 3, screenWidth - 2, screenHeight - 12))
-local alarmPanel = mainContainer:addChild(GUI.container(2, screenHeight - 8, screenWidth - 2, 7))
-local alarmTitle = alarmPanel:addChild(GUI.text(1, 1, 0xFFAA00, "Alarms"))
-local alarmRows = {}
+local mimicPanel = window:addChild(GUI.container(contentX, mimicY, contentWidth, mimicHeight))
+
+local alarmY = mimicY + mimicHeight + 1
+local alarmPanel = window:addChild(GUI.container(contentX, alarmY, contentWidth, 7))
+alarmPanel:addChild(GUI.text(1, 1, 0xFFAA00, "Alarms"))
+local alarmRowsContainer = alarmPanel:addChild(GUI.container(1, 2, contentWidth, 5))
 
 -- Colors matching each DPS state, per the plan's mimic-diagram spec.
 local DPS_COLOR = {
@@ -68,7 +92,10 @@ end
 
 local function closeDialogIfAny()
   if app.dialog then
-    mainContainer:removeChild(app.dialog)
+    -- object:remove() is the documented way to remove a single widget
+    -- from its parent container (GUI-API.md) -- there is no
+    -- container:removeChild(x) method.
+    app.dialog:remove()
     app.dialog = nil
   end
 end
@@ -83,17 +110,22 @@ end
 
 local function openControlDialog(fullRef, pointType)
   closeDialogIfAny()
-  local w, h = 40, 9
-  local x, y = math.floor((screenWidth - w) / 2), math.floor((screenHeight - h) / 2)
-  local dialog = mainContainer:addChild(GUI.container(x, y, w, h))
-  dialog:addChild(GUI.panel(1, 1, w, h, 0x1B1B1B))
-  dialog:addChild(GUI.text(2, 1, 0xFFFFFF, "Control: " .. fullRef))
-  local status = dialog:addChild(GUI.text(2, 3, 0xCCCCCC, "Not selected."))
 
-  local selectBtn = dialog:addChild(GUI.button(2, 5, 14, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Select"))
-  local openBtn = dialog:addChild(GUI.button(2, 7, 14, 1, 0x006600, 0xFFFFFF, 0x00AA00, 0xFFFFFF, "Operate Open"))
-  local closeBtn = dialog:addChild(GUI.button(18, 7, 14, 1, 0x660000, 0xFFFFFF, 0xAA0000, 0xFFFFFF, "Operate Close"))
-  local cancelBtn = dialog:addChild(GUI.button(w - 12, 5, 10, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Cancel"))
+  -- GUI.addBackgroundContainer (GUI-API.md) is the documented modal-
+  -- dialog helper: it adds a semi-transparent background panel (with a
+  -- built-in click-outside-to-close handler) plus an auto-arranging
+  -- layout, both already parented into `window`. Note: clicking outside
+  -- the dialog closes it via that built-in handler WITHOUT sending an
+  -- explicit `cancel` -- an outstanding `select` reservation is simply
+  -- abandoned client-side; the IED's own sbo.timeoutSec still releases
+  -- it server-side, so this is a minor UX gap, not a correctness one.
+  local dialog = GUI.addBackgroundContainer(window, true, true, "Control: " .. fullRef)
+
+  local status = dialog.layout:addChild(GUI.text(1, 1, 0xCCCCCC, "Not selected."))
+  local selectBtn = dialog.layout:addChild(GUI.button(1, 1, 24, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Select"))
+  local openBtn = dialog.layout:addChild(GUI.button(1, 1, 24, 1, 0x006600, 0xFFFFFF, 0x00AA00, 0xFFFFFF, "Operate Open"))
+  local closeBtn = dialog.layout:addChild(GUI.button(1, 1, 24, 1, 0x660000, 0xFFFFFF, 0xAA0000, 0xFFFFFF, "Operate Close"))
+  local cancelBtn = dialog.layout:addChild(GUI.button(1, 1, 24, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Cancel"))
   openBtn.disabled, closeBtn.disabled = true, true
 
   selectBtn.onTouch = function()
@@ -141,7 +173,7 @@ end
 
 --- Mimic diagram ------------------------------------------------------------
 
-local nextAutoX, nextAutoY = 1, 1
+local nextAutoX, nextAutoY = 0, 0
 local AUTO_COLS = 4
 
 local function layoutFor(fullRef)
@@ -160,6 +192,7 @@ local function buildMimic()
   nextAutoX, nextAutoY = 0, 0
   for fullRef, p in pairs(app.points) do
     local x, y = layoutFor(fullRef)
+    p.layoutX, p.layoutY = x, y
     local label = p.ln .. "." .. p.doName
     if p.type == "DPS" or p.type == "SPS" then
       local widget = mimicPanel:addChild(GUI.button(x, y, 16, 1, 0x444444, 0xFFFFFF, 0x666666, 0xFFFFFF, label))
@@ -185,13 +218,27 @@ local function refreshMimicWidget(fullRef)
   local p = app.points[fullRef]
   if not p or not p.widget then return end
   local label = p.ln .. "." .. p.doName
-  if p.type == "DPS" then
-    p.widget.colors.default.background = qualityColor(p.quality, DPS_COLOR[p.value] or 0x888888)
-    p.widget.text = label .. ": " .. tostring(p.value)
-  elseif p.type == "SPS" then
-    p.widget.colors.default.background = qualityColor(p.quality, p.value and 0x00CC00 or 0x666666)
-    p.widget.text = label .. ": " .. tostring(p.value)
+  if p.type == "DPS" or p.type == "SPS" then
+    local bg
+    if p.type == "DPS" then
+      bg = qualityColor(p.quality, DPS_COLOR[p.value] or 0x888888)
+    else
+      bg = qualityColor(p.quality, p.value and 0x00CC00 or 0x666666)
+    end
+    -- A widget's background color has no documented mutable property
+    -- (GUI-API.md's button properties table has no color entry, and
+    -- nothing like the constructor's buttonColor is ever shown being
+    -- reassigned) -- recreate the widget in place instead of mutating an
+    -- undocumented field, at the position buildMimic() recorded.
+    p.widget:remove()
+    local widget = mimicPanel:addChild(GUI.button(p.layoutX, p.layoutY, 16, 1, bg, 0xFFFFFF, 0x666666, 0xFFFFFF,
+      label .. ": " .. tostring(p.value)))
+    widget.onTouch = function() openControlDialog(fullRef, p.type) end
+    p.widget = widget
   elseif p.type == "MV" then
+    -- .text reassignment IS documented ("When you change the text, its
+    -- width is automatically calculated" -- GUI-API.md's GUI.text
+    -- section), so this stays a direct mutation, no recreation needed.
     p.widget.text = label .. ": " .. tostring(p.value) .. (p.quality ~= "good" and (" [" .. p.quality .. "]") or "")
   end
 end
@@ -199,18 +246,16 @@ end
 --- Alarm panel ------------------------------------------------------------
 
 local function refreshAlarmPanel()
-  for _, row in ipairs(alarmRows) do alarmPanel:removeChild(row) end
-  alarmRows = {}
+  alarmRowsContainer:removeChildren()
   for i, a in ipairs(app.alarms) do
     if i > 5 then break end -- panel only shows the 5 most recent; full list belongs in a dedicated view
-    local y = 2 + i
+    local y = i
     local color = a.severity == "high" and 0xFF3333 or (a.severity == "medium" and 0xFFAA00 or 0xFFFF66)
     local label = string.format("[%s] %s%s", a.severity, a.message, a.acked and " (acked)" or "")
-    local text = alarmPanel:addChild(GUI.text(1, y, color, label))
-    table.insert(alarmRows, text)
+    alarmRowsContainer:addChild(GUI.text(1, y, color, label))
     if not a.acked then
-      local ackBtn = alarmPanel:addChild(GUI.button(screenWidth - 12, y, 10, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Ack"))
-      table.insert(alarmRows, ackBtn)
+      local ackBtn = alarmRowsContainer:addChild(
+        GUI.button(contentWidth - 12, y, 10, 1, 0x333333, 0xFFFFFF, 0x666666, 0xFFFFFF, "Ack"))
       ackBtn.onTouch = function()
         app.client:sendRequest({ type = "alarm-ack", alarmId = a.id, operator = cfg.operator })
       end
@@ -299,11 +344,11 @@ end
 connectAndLoadModel()
 workspace:draw()
 
--- Periodic poll, same event.timer pattern used by the OpenOS-side
--- iedd/scadad engines -- see sas/ied/engine.lua's file header for why
--- this is safe/correct under OpenComputers' cooperative event model.
-event.timer(cfg.pollIntervalSec, pollTick, math.huge)
-
--- Hands control to MineOS's own event loop; it services event.timer
--- callbacks (including pollTick above) the same way OpenOS's shell does.
-workspace:start(cfg.pollIntervalSec)
+-- Periodic poll via MineOS's own event.addHandler (Event-API.md) --
+-- handlers registered this way run during MineOS's own already-running
+-- event.pull() loop, which is why this script does NOT (and must not)
+-- call workspace:start() itself: that would start a second, competing
+-- event loop instead of cooperating with the one MineOS's desktop core
+-- already owns (see this file's header and README.md's architecture
+-- section for the full reasoning).
+event.addHandler(pollTick, cfg.pollIntervalSec)
