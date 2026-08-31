@@ -24,13 +24,15 @@
 
   goose = {
     port = 8104,
-    -- GOOSE has no multicast in this stack (OC-IP-Stack has no
-    -- broadcast/multicast address concept) -- list every peer that should
-    -- receive this IED's GOOSE publications by "subnet.host" address.
-    -- Typically the SCADA node, and/or peer IEDs for direct interlocks.
-    peers = {
-      -- "1.1",  -- SCADA
-    },
+    -- Shared multicast group this IED joins to publish AND subscribe
+    -- GOOSE -- a "subnet.host" address in OC-IP-Stack's reserved
+    -- multicast subnet (255, ip.MULTICAST_SUBNET). Must exactly match
+    -- every other IED's goose.group and the SCADA's goose.group in
+    -- sas-scada.cfg -- there is one shared group for the whole station
+    -- bus, not one per pair of peers. No per-peer address list needed
+    -- (unlike a plain unicast/UDP fallback) -- every IED that joins this
+    -- group hears every other IED's publications automatically.
+    group = "255.10",
     -- Fast retransmit burst (seconds after each real dataset change)...
     burstIntervalsSec = { 0.2, 0.5, 1, 2 },
     -- ...then settle to this steady heartbeat for liveness.
@@ -45,6 +47,13 @@
   -- least this often, so a subscriber can never silently go stale on a
   -- genuinely static plant.
   integritySec = 30,
+
+  -- How long a PEER IED's GOOSE can go without a fresh datagram before
+  -- that peer's points (used by `interlocks` below) are treated as
+  -- stale. Same concept as sas-scada.cfg's gooseStaleAfterSec, evaluated
+  -- locally here instead, since interlocking is IED-to-IED and never
+  -- brokered through SCADA.
+  gooseStaleAfterSec = 15,
 
   points = {
     -- Breaker position status (double point: open/closed/intermediate/bad),
@@ -88,6 +97,41 @@
     {
       ln = "GGIO1", doName = "Ind1", type = "SPS", goose = false,
       io = { kind = "redstone", address = "<redstone-component-address>", side = 4, onLevel = 1 },
+    },
+  },
+
+  -- Peer-to-peer safety interlocks (IEC 61850's actual primary GOOSE use
+  -- case): block a local `operate` to a specific control point/value
+  -- while a condition against a PEER IED's GOOSE-sourced point value
+  -- holds true. Evaluated locally on THIS IED (sas/ied/engine.lua's
+  -- handleOperate), after select-before-operate validation succeeds but
+  -- before the physical output is applied -- only `operate` carries the
+  -- target `value`, so `select` is never interlock-checked. Requires
+  -- this IED to have joined the shared `goose.group` above (it always
+  -- does), AND requires the peer's own point to be published with
+  -- `goose = true` in ITS OWN sas-ied.cfg -- an interlock referencing a
+  -- peer point that peer never GOOSE-publishes will always be treated
+  -- as "unknown" (see failOpen below).
+  interlocks = {
+    {
+      id = "BRK1_VS_BRK2",     -- optional; used only in log/error messages
+      localRef = "XCBR1.Pos",  -- this IED's own point (IED-local ref, matches `points` above)
+      blockValue = "closed",   -- block operate(localRef, blockValue) while...
+      peerIed = "IED-BRK2",    -- ...this peer IED's iedName...
+      peerRef = "XCBR1.Pos",   -- ...point (IED-local ref, as published in THEIR goose payload)...
+      condition = "eq",        -- ...compares (eq|ne|lt|gt, same vocabulary as sas-scada.cfg alarms)...
+      peerValue = "closed",    -- ...to this value, true = blocked.
+
+      -- Fail-safe by default: if the peer point has never been heard, or
+      -- its GOOSE has gone stale (see gooseStaleAfterSec above), the
+      -- operate is BLOCKED. Set true to instead let the operate through
+      -- when the peer can't be evaluated (fail-open) -- only appropriate
+      -- for interlocks where availability matters more than this
+      -- specific safety case. Default: false.
+      -- failOpen = false,
+
+      -- Optional per-rule override of gooseStaleAfterSec above.
+      -- staleAfterSec = 15,
     },
   },
 }

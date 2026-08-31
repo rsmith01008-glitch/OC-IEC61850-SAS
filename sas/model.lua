@@ -96,6 +96,23 @@ function model.ensureIedEntry(aggDb, iedName)
   return entry
 end
 
+-- Ensures (creating if absent) a peer's GOOSE-only tracking entry: used
+-- by an IED's own lightweight peer-point tracking for interlocking
+-- (sas/ied/engine.lua's receiveGoosePeers/interlockBlocks). Deliberately
+-- smaller than ensureIedEntry's aggregate-database entry -- no `ld` or
+-- `connOk`, since an IED never opens an MMS connection to a peer IED, it
+-- only ever hears its GOOSE. Returns { points = {[ref]=pointRec},
+-- gooseState = nil } (gooseState set lazily on first received datagram
+-- from that peer, same lazy-init pattern as ensureIedEntry's gooseState).
+function model.ensureGoosePeerEntry(peersTbl, iedName)
+  local entry = peersTbl[iedName]
+  if not entry then
+    entry = { points = {}, gooseState = nil }
+    peersTbl[iedName] = entry
+  end
+  return entry
+end
+
 -- Replaces an IED entry's point set from a get-model-reply's point list
 -- (each { ln, doName, type }, no live values yet).
 function model.applyModelReply(aggDb, iedName, ld, points)

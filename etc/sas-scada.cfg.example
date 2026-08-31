@@ -10,8 +10,9 @@
   -- MMS-lite TCP server port for HMI clients.
   hms = { port = 8103 },
 
-  -- GOOSE subscriber UDP port -- must match every IED's goose.port.
-  goose = { port = 8104 },
+  -- GOOSE subscriber -- must join the same multicast group as every
+  -- IED's goose.group, and bind the same port as every IED's goose.port.
+  goose = { port = 8104, group = "255.10" },
 
   tickIntervalSec = 0.2,
 

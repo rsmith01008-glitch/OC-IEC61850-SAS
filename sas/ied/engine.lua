@@ -24,10 +24,26 @@ local DEFAULTS = {
   iedName = "IED1",
   logicalDevice = "LD0",
   mms = { port = 8102 },
-  goose = { port = 8104, peers = {}, burstIntervalsSec = { 0.2, 0.5, 1, 2 }, heartbeatSec = 5 },
+  goose = { port = 8104, group = "255.10", burstIntervalsSec = { 0.2, 0.5, 1, 2 }, heartbeatSec = 5 },
   tickIntervalSec = 0.2,
   integritySec = 30,
+  -- How long a PEER IED's GOOSE can go without a fresh datagram before
+  -- that peer's points (used by `interlocks` below) are treated as stale.
+  gooseStaleAfterSec = 15,
   points = {},
+  interlocks = {},
+}
+
+-- Condition vocabulary for interlock rules, deliberately duplicated from
+-- sas/alarms.lua rather than shared -- matches this codebase's existing
+-- norm of small per-module tables over a shared abstraction (see
+-- sas/proto/goose.lua's and OC-IP-Stack's own multicast.lua's header
+-- comments on the same point re: wire header formats).
+local CONDITIONS = {
+  eq = function(v, target) return v == target end,
+  ne = function(v, target) return v ~= target end,
+  lt = function(v, target) return type(v) == "number" and v < target end,
+  gt = function(v, target) return type(v) == "number" and v > target end,
 }
 
 engine.state = {
@@ -37,8 +53,9 @@ engine.state = {
   iedName = nil,
   listener = nil,
   clients = {},        -- array of { conn=, reader=, subs=nil|"*"|{[ref]=true} }
-  gooseSock = nil,
+  mcastSock = nil,     -- ipstack.socket multicast socket, joined to cfg.goose.group (publish + subscribe)
   gooseState = nil,    -- goose.newPublisher(...)
+  peers = {},           -- [peerIedName] = model.ensureGoosePeerEntry(...) -- GOOSE heard from other IEDs, for interlocking
   sbo = nil,
   pulses = {},          -- pending redstone pulses, see sas.io.redstone
   lastIntegrityAt = nil,
@@ -142,6 +159,44 @@ local function applyOperate(rec, value)
   return nil, "unsupported control type: " .. tostring(rec.type)
 end
 
+-- Peer-to-peer safety interlocking (IEC 61850 GOOSE's actual primary
+-- real-world use case): block operating `ref` to `targetValue` while a
+-- condition against a PEER IED's GOOSE-sourced point value holds true.
+-- Evaluated here (called from handleOperate, after SBO validation
+-- succeeds but before the physical output is applied) rather than in
+-- handleSelect, since only operate carries the target value -- select
+-- never does (see sas/proto/messages.lua's catalog).
+--
+-- Fail-safe by default: if the referenced peer point has never been
+-- heard, or its GOOSE has gone stale, the rule BLOCKS (matches safety-
+-- interlock convention: unknown state is treated as unsafe). A rule can
+-- opt into fail-open (`failOpen = true`) when availability matters more
+-- than that specific safety case.
+local function interlockBlocks(ref, targetValue, now)
+  for _, rule in ipairs(engine.state.cfg.interlocks) do
+    if rule.localRef == ref and rule.blockValue == targetValue then
+      local peerEntry = engine.state.peers[rule.peerIed]
+      local peerPoint = peerEntry and peerEntry.points[rule.peerRef]
+      local staleAfterSec = rule.staleAfterSec or engine.state.cfg.gooseStaleAfterSec
+      local stale = (not peerEntry) or (not peerEntry.gooseState)
+        or goose.isStale(peerEntry.gooseState, now, staleAfterSec)
+      local unknown = (not peerPoint) or peerPoint.quality ~= "good"
+
+      if stale or unknown then
+        if rule.failOpen ~= true then
+          return true, string.format("interlock %s: peer %s/%s unknown or stale",
+            rule.id or ref, rule.peerIed, rule.peerRef)
+        end
+        -- failOpen == true: this rule does not block on unknown/stale data.
+      elseif CONDITIONS[rule.condition](peerPoint.value, rule.peerValue) then
+        return true, string.format("interlock %s: blocked by %s/%s",
+          rule.id or ref, rule.peerIed, rule.peerRef)
+      end
+    end
+  end
+  return false
+end
+
 local function handleOperate(client, msg)
   local rec = engine.state.db.points[msg.ref]
   if not rec or not model.CONTROL_TYPES[rec.type] then
@@ -149,9 +204,16 @@ local function handleOperate(client, msg)
     return
   end
 
-  local ok, err = engine.state.sbo:operate(msg.ref, msg.token, msg.clientId, computer.uptime())
+  local now = computer.uptime()
+  local ok, err = engine.state.sbo:operate(msg.ref, msg.token, msg.clientId, now)
   if not ok then
     sendMsg(client, messages.replyTo(msg, { ok = false, err = err }))
+    return
+  end
+
+  local blocked, blockReason = interlockBlocks(msg.ref, msg.value, now)
+  if blocked then
+    sendMsg(client, messages.replyTo(msg, { ok = false, err = blockReason }))
     return
   end
 
@@ -308,10 +370,37 @@ local function publishGoose(changedRefs, now)
     engine.state.gooseState.stNum, engine.state.gooseState.sqNum, now, values)
   local wire = goose.encodeWire(payload)
 
-  for _, peer in ipairs(engine.state.cfg.goose.peers) do
-    local ok, serr = engine.state.gooseSock:sendto(peer, engine.state.cfg.goose.port, wire)
-    if not ok then
-      engine.log("warn", "ied: goose send to %s failed: %s", tostring(peer), tostring(serr))
+  local ok, serr = engine.state.mcastSock:send(engine.state.cfg.goose.group, engine.state.cfg.goose.port, wire)
+  if not ok then
+    engine.log("warn", "ied: goose multicast send failed: %s", tostring(serr))
+  end
+end
+
+-- Non-blocking drain of GOOSE heard from other IEDs on the shared
+-- multicast group -- used to feed interlockBlocks() above. A multicast
+-- send is a real flooded frame this IED will also receive back (see
+-- OC-IP-Stack's ip.lua: multicast sends flood every local interface), so
+-- this IED's own publications must be explicitly filtered out here.
+local function receiveGoosePeers(now)
+  while true do
+    local data, srcIp = engine.state.mcastSock:receivefrom(0) -- explicit 0: non-blocking
+    if not data then break end
+
+    local msg, derr = goose.decodeWire(data)
+    if msg and goose.isValid(msg) and msg.ied ~= engine.state.iedName then
+      local peerEntry = model.ensureGoosePeerEntry(engine.state.peers, msg.ied)
+      if not peerEntry.gooseState then peerEntry.gooseState = goose.newSubscriberState() end
+      goose.recordReceived(peerEntry.gooseState, msg, now)
+      for ref, v in pairs(msg.values) do
+        local rec = peerEntry.points[ref]
+        if not rec then
+          rec = { value = nil, quality = "invalid", lastChangeAt = nil }
+          peerEntry.points[ref] = rec
+        end
+        model.setValue(rec, v.v, v.q, now)
+      end
+    elseif msg and not goose.isValid(msg) then
+      engine.log("warn", "ied: dropped malformed GOOSE datagram from %s", tostring(srcIp))
     end
   end
 end
@@ -322,6 +411,8 @@ function engine.tick()
 
     acceptClients()
     serviceClients()
+
+    receiveGoosePeers(now)
 
     local changedRefs = pollPoints(now)
     deliverReports(changedRefs)
@@ -336,6 +427,35 @@ function engine.tick()
 end
 
 --- Lifecycle ------------------------------------------------------------
+
+-- Hard-validates every interlocks[] rule against this IED's own point
+-- database at start time: unknown/non-control localRef, missing
+-- blockValue/peerIed/peerRef/peerValue, or an unrecognized condition.
+-- Returns true, or nil, err.
+local function validateInterlocks(db, interlocks)
+  for i, rule in ipairs(interlocks) do
+    local rec = type(rule.localRef) == "string" and db.points[rule.localRef]
+    if not rec then
+      return nil, "interlocks[" .. i .. "]: unknown localRef " .. tostring(rule.localRef)
+    end
+    if not model.CONTROL_TYPES[rec.type] then
+      return nil, "interlocks[" .. i .. "]: localRef " .. rule.localRef .. " is not a control point"
+    end
+    if rule.blockValue == nil then
+      return nil, "interlocks[" .. i .. "]: missing blockValue"
+    end
+    if type(rule.peerIed) ~= "string" or type(rule.peerRef) ~= "string" then
+      return nil, "interlocks[" .. i .. "]: peerIed/peerRef must be strings"
+    end
+    if not CONDITIONS[rule.condition] then
+      return nil, "interlocks[" .. i .. "]: unknown condition " .. tostring(rule.condition)
+    end
+    if rule.peerValue == nil then
+      return nil, "interlocks[" .. i .. "]: missing peerValue"
+    end
+  end
+  return true
+end
 
 -- Idempotent: calling start() while already running is a no-op success.
 function engine.start()
@@ -356,6 +476,14 @@ function engine.start()
   engine.state.db = dbResult
   engine.state.iedName = cfg.iedName
 
+  -- A misconfigured safety interlock must refuse to start the daemon,
+  -- not silently no-op.
+  local ivOk, ivErr = validateInterlocks(engine.state.db, cfg.interlocks)
+  if not ivOk then
+    engine.log("error", "ied: invalid interlock configuration: %s", tostring(ivErr))
+    return nil, ivErr
+  end
+
   -- Fails loudly (no retry loop) if ipstackd isn't running -- matches
   -- ipstack.socket's own "never hang on a dead daemon" rule.
   local listener, lerr = socket.listen(cfg.mms.port)
@@ -365,19 +493,36 @@ function engine.start()
   end
   engine.state.listener = listener
 
-  local gooseSock, gerr = socket.udp()
-  if not gooseSock then
-    engine.log("error", "ied: could not open GOOSE socket: %s", tostring(gerr))
+  local mcastSock, merr = socket.multicast()
+  if not mcastSock then
+    engine.log("error", "ied: could not open GOOSE multicast socket: %s", tostring(merr))
     pcall(function() listener:close() end)
     engine.state.listener = nil
-    return nil, gerr
+    return nil, merr
   end
-  engine.state.gooseSock = gooseSock
+  local jok, jerr = mcastSock:join(cfg.goose.group)
+  if not jok then
+    engine.log("error", "ied: could not join GOOSE group %s: %s", tostring(cfg.goose.group), tostring(jerr))
+    pcall(function() mcastSock:close() end)
+    pcall(function() listener:close() end)
+    engine.state.listener = nil
+    return nil, jerr
+  end
+  local bok, berr = mcastSock:bind(cfg.goose.port)
+  if not bok then
+    engine.log("error", "ied: could not bind GOOSE port %d: %s", cfg.goose.port, tostring(berr))
+    pcall(function() mcastSock:close() end)
+    pcall(function() listener:close() end)
+    engine.state.listener = nil
+    return nil, berr
+  end
+  engine.state.mcastSock = mcastSock
 
   engine.state.clients = {}
   engine.state.pulses = {}
   engine.state.sbo = sbo.new()
   engine.state.gooseState = goose.newPublisher(cfg.goose)
+  engine.state.peers = {}
   engine.state.lastIntegrityAt = nil
 
   engine.state.tickTimerId = event.timer(cfg.tickIntervalSec, engine.tick, math.huge)
@@ -406,10 +551,11 @@ function engine.stop()
     pcall(function() engine.state.listener:close() end)
     engine.state.listener = nil
   end
-  if engine.state.gooseSock then
-    pcall(function() engine.state.gooseSock:close() end)
-    engine.state.gooseSock = nil
+  if engine.state.mcastSock then
+    pcall(function() engine.state.mcastSock:close() end)
+    engine.state.mcastSock = nil
   end
+  engine.state.peers = {}
 
   engine.state.running = false
   engine.log("info", "iedd stopped")

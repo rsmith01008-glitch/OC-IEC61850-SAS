@@ -1,20 +1,26 @@
--- sas.proto.goose: GOOSE-lite fast peer messaging over UDP.
+-- sas.proto.goose: GOOSE-lite fast peer messaging over multicast.
 --
--- Real IEC 61850 GOOSE is Ethernet-multicast. OC-IP-Stack has no
--- broadcast/multicast address concept anywhere (confirmed by reading its
--- ipstack/ip.lua: routing/ARP always resolve one specific host), so
--- publishing here means looping a unicast udp:sendto() over a configured
--- list of peer addresses instead. Everything else about the model --
--- stNum/sqNum change/retransmission counters, a fast retransmit burst
--- after a real change settling into a steady heartbeat -- mirrors real
--- GOOSE's reliability-over-lossy-transport behavior.
+-- Real IEC 61850 GOOSE is Ethernet-multicast. OC-IP-Stack now provides a
+-- real multicast primitive (ipstack.socket.multicast(): join/leave/bind/
+-- send/receivefrom, addressed in the same "subnet.host" space with
+-- subnet 255 reserved for multicast groups -- see ip.MULTICAST_SUBNET/
+-- ip.isMulticast), so publishing/subscribing GOOSE here means every node
+-- joining one shared multicast group per station (sas/ied/engine.lua and
+-- sas/scada/engine.lua each own their own socket.multicast() and
+-- goose.group config -- this module has no transport/addressing concept
+-- of its own). Everything below is deliberately transport-agnostic and
+-- needed no changes when the transport moved from unicast fan-out to
+-- multicast: stNum/sqNum change/retransmission counters, a fast
+-- retransmit burst after a real change settling into a steady heartbeat,
+-- mirroring real GOOSE's reliability-over-lossy-transport behavior.
 local serialization = require("serialization")
 
 local goose = {}
 
--- UDP datagrams are already delivered as discrete units by ipstack.udp
--- (no stream framing needed, unlike sas.proto.framing's TCP use), so
--- these just wrap serialization.serialize/unserialize directly.
+-- Multicast datagrams are already delivered as discrete units by
+-- ipstack.multicast (no stream framing needed, unlike sas.proto.framing's
+-- TCP use), so these just wrap serialization.serialize/unserialize
+-- directly.
 function goose.encodeWire(msgTable)
   return serialization.serialize(msgTable)
 end

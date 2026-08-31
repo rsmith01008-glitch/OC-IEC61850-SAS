@@ -27,7 +27,7 @@ local CFG_PATH = "/etc/sas-scada.cfg"
 
 local DEFAULTS = {
   hms = { port = 8103 },
-  goose = { port = 8104 },
+  goose = { port = 8104, group = "255.10" },
   tickIntervalSec = 0.2,
   resyncSec = 60,
   connectTimeoutSec = 5,
@@ -43,7 +43,7 @@ engine.state = {
   cfg = nil,
   db = nil,               -- model.newAggregateDatabase()
   iedClients = {},         -- [iedName] = { cfg={name,ip,port}, client=mmsclient|nil, lastAttemptAt=, modelId=, subId= }
-  gooseSock = nil,
+  mcastSock = nil,       -- ipstack.socket multicast socket, joined to cfg.goose.group
   hmsListener = nil,
   hmiClients = {},         -- array of { conn=, reader=, subs=nil|"*"|{[ref]=true} }
   alarmList = nil,         -- alarms.newActiveList()
@@ -188,7 +188,7 @@ end
 
 local function tickGoose(now)
   while true do
-    local data, srcIp = engine.state.gooseSock:receivefrom(0) -- explicit 0: non-blocking
+    local data, srcIp = engine.state.mcastSock:receivefrom(0) -- explicit 0: non-blocking
     if not data then break end
 
     local msg, derr = goose.decodeWire(data)
@@ -519,24 +519,30 @@ function engine.start()
   engine.state.pendingRelays = {}
   engine.state.lastResyncAt = nil
 
-  local gooseSock, gerr = socket.udp()
-  if not gooseSock then
-    engine.log("error", "scada: could not open GOOSE socket: %s (is ipstackd running?)", tostring(gerr))
-    return nil, gerr
+  local mcastSock, merr = socket.multicast()
+  if not mcastSock then
+    engine.log("error", "scada: could not open GOOSE multicast socket: %s (is ipstackd running?)", tostring(merr))
+    return nil, merr
   end
-  local bok, berr = gooseSock:bind(cfg.goose.port)
+  local jok, jerr = mcastSock:join(cfg.goose.group)
+  if not jok then
+    engine.log("error", "scada: could not join GOOSE group %s: %s", tostring(cfg.goose.group), tostring(jerr))
+    pcall(function() mcastSock:close() end)
+    return nil, jerr
+  end
+  local bok, berr = mcastSock:bind(cfg.goose.port)
   if not bok then
     engine.log("error", "scada: could not bind GOOSE port %d: %s", cfg.goose.port, tostring(berr))
-    pcall(function() gooseSock:close() end)
+    pcall(function() mcastSock:close() end)
     return nil, berr
   end
-  engine.state.gooseSock = gooseSock
+  engine.state.mcastSock = mcastSock
 
   local listener, lerr = socket.listen(cfg.hms.port)
   if not listener then
     engine.log("error", "scada: could not start HMI-facing listener: %s", tostring(lerr))
-    pcall(function() gooseSock:close() end)
-    engine.state.gooseSock = nil
+    pcall(function() mcastSock:close() end)
+    engine.state.mcastSock = nil
     return nil, lerr
   end
   engine.state.hmsListener = listener
@@ -569,9 +575,9 @@ function engine.stop()
     pcall(function() engine.state.hmsListener:close() end)
     engine.state.hmsListener = nil
   end
-  if engine.state.gooseSock then
-    pcall(function() engine.state.gooseSock:close() end)
-    engine.state.gooseSock = nil
+  if engine.state.mcastSock then
+    pcall(function() engine.state.mcastSock:close() end)
+    engine.state.mcastSock = nil
   end
 
   engine.state.running = false
