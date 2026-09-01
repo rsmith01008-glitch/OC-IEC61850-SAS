@@ -9,6 +9,11 @@ it into the `.cfg` files this project's runtime actually reads (checked
 in as golden reference at `etc/generated/`); see that tool's own README
 for the compiler's invocation and how it maps SCL onto our config.
 
+This particular file was hand-authored as a worked example. For a *new*
+station, use `tools/scl-generator/` instead of hand-writing SCL from
+scratch -- an interactive wizard that turns layout/bay/voltage answers
+into a `.scd` plus a one-line diagram.
+
 ## Topology
 
 ```
