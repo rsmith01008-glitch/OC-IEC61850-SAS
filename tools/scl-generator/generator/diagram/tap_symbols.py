@@ -29,6 +29,14 @@ from .svg_primitives import svg_polygon, svg_circle, svg_line, svg_text
 _SIZE = 10
 _DISCONNECT_SIZE = 7
 _EXIT_STUB_LEN = 10
+#: draw_tap_with_exit_horizontal's stub is longer than the vertical
+#: variant's: it branches off a vertical diameter string that continues
+#: on both sides of the branch point (see draw_breaker_and_half.py), so
+#: its disconnect needs enough clearance that the tick doesn't cross
+#: back over that continuing string -- the vertical variant's stub ends
+#: at a bus rail junction with nothing continuing past it, so it doesn't
+#: need the same clearance.
+_BRANCH_STUB_LEN = 30
 _LABEL_GAP = 26
 
 #: Distance from a breaker's own center to each of its 2 flanking
@@ -106,21 +114,21 @@ def draw_tap_with_exit_horizontal(x: float, y: float, direction_dx: float, tap) 
     horizontal bus rail. Same rule: a transformer tap connects straight
     in with no exit switch; a line/feeder tap gets its own isolating
     disconnect on a short horizontal stub.
+
+    A transformer tap draws nothing here at all: the caller already
+    drew the junction dot, and draw_transformer.py picks up from that
+    exact point and draws (and labels) everything downstream of it, so
+    a second label here would be redundant -- the connector is easy
+    enough to follow down on its own.
     """
+    if tap.kind == TapKind.TRANSFORMER:
+        return []
+
     elements = []
     label_anchor = "start" if direction_dx > 0 else "end"
-
-    if tap.kind == TapKind.TRANSFORMER:
-        # Labeled above the junction, not beside it -- draw_transformer.py
-        # jogs sideways starting from this exact point, so a same-side
-        # label would sit right on top of that jog line.
-        elements.extend(draw_horizontal(x, y, direction_dx, tap.kind))
-        elements.append(svg_text(x, y - 10, tap.name, text_anchor="middle", font_size=11))
-        return elements
-
-    tap_x = x + direction_dx * _EXIT_STUB_LEN
+    tap_x = x + direction_dx * _BRANCH_STUB_LEN
     elements.append(svg_line(x, y, tap_x, y, stroke="#333", stroke_width=2))
-    elements.extend(draw_disconnect(x + direction_dx * _EXIT_STUB_LEN / 2, y, vertical=False))
+    elements.extend(draw_disconnect(x + direction_dx * _BRANCH_STUB_LEN / 2, y, vertical=False))
     elements.extend(draw_horizontal(tap_x, y, direction_dx, tap.kind))
     elements.append(svg_text(tap_x + direction_dx * _LABEL_GAP, y + 4, tap.name,
                               text_anchor=label_anchor, font_size=11))

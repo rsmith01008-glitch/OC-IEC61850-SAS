@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lxml import etree
 
 from generator.diagram import layout_geometry as geo
-from generator.diagram import draw_transformer, onelinediagram
+from generator.diagram import draw_transformer, onelinediagram, tap_symbols
 from generator.layouts import breaker_and_half, single_bus, transformer_lv
 from generator.topology import Tap, TapKind, Station
 
@@ -38,6 +38,26 @@ class TestTapX(unittest.TestCase):
     def test_strip_width_grows_with_tap_count(self):
         self.assertLess(geo.strip_width(1), geo.strip_width(2))
         self.assertGreater(geo.strip_width(0), 0)
+
+
+class TestBranchStubClearsItsOwnColumn(unittest.TestCase):
+    """A line/feeder tap branching sideways off a vertical diameter
+    string (draw_breaker_and_half.py) must clear its own exit disconnect
+    of that string -- the string continues on both sides of the branch
+    point, so a disconnect tick centered too close to it visually
+    crosses back over the string it just branched off of.
+    """
+
+    def test_exit_disconnect_tick_does_not_cross_the_origin_column(self):
+        x, y = 100.0, 50.0
+        svg = "".join(tap_symbols.draw_tap_with_exit_horizontal(x, y, 1, Tap("Line1", TapKind.LINE)))
+        endpoints = re.findall(r'x1="([\d.+-]+)"[^/]*x2="([\d.+-]+)"', svg)
+        self.assertTrue(endpoints)
+        # every drawn line segment's endpoints must stay on the branch
+        # side of x (the column this tap branches off of)
+        for x1, x2 in endpoints:
+            self.assertGreaterEqual(float(x1), x)
+            self.assertGreaterEqual(float(x2), x)
 
 
 class TestDiameterX(unittest.TestCase):
@@ -122,10 +142,11 @@ class TestTransformerBand(unittest.TestCase):
         self.assertIn("Feed1", elements[0])
         self.assertIn("Feed2", elements[0])
 
-    def test_single_output_is_offset_right_of_hv_x_not_centered(self):
-        # A centered single output lands exactly under hv_x, visually
-        # reading as a straight continuation of whatever breaker sits
-        # above it in the switchyard strip -- see this module's header.
+    def test_single_output_is_inline_with_the_transformer_body(self):
+        # The LV fan is centered on body_x (the winding symbol's own x),
+        # not offset from it -- unlike the HV run above the symbol,
+        # there's no breaker/bus-rail column below it for a centered
+        # output to be confused with (see this module's header).
         hv_x = 100.0
         svg = draw_transformer.draw(
             "XFMR1", hv_point=(hv_x, 50.0), lv_kv=230,
@@ -133,7 +154,9 @@ class TestTransformerBand(unittest.TestCase):
         )[0]
         m = re.search(r'<text x="([\d.+-]+)"[^>]*>Feed1<', svg)
         self.assertIsNotNone(m)
-        self.assertGreater(float(m.group(1)), hv_x + 30)
+        circle_cx = [float(c) for c in re.findall(r'<circle cx="([\d.+-]+)"', svg)]
+        body_x = sum(circle_cx) / len(circle_cx)
+        self.assertAlmostEqual(float(m.group(1)), body_x, delta=1)
 
     def test_max_x_grows_with_output_count_and_clears_hv_x(self):
         self.assertGreater(draw_transformer.max_x(100.0, 1), 100.0)

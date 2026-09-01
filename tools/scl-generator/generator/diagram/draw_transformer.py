@@ -29,9 +29,9 @@ disconnect sits low on that run, below the bus rail and just above the
 winding symbol -- matching real practice (the transformer's HV
 disconnect lives at the transformer end, not up in the switchyard bay
 where the breakers' own disconnects already are). The LV output fan is
-likewise offset clear of `body_x`, not centered on it -- otherwise a
-single output (or the middle one, for an odd count) lands back on the
-same straight line as the HV run feeding the transformer from above.
+centered on `body_x`, in line with the transformer's own LV connector --
+unlike the HV run above the symbol, there's no breaker/bus-rail column
+below the symbol for a centered output to be confused with.
 """
 
 from ..topology import TapKind
@@ -62,7 +62,8 @@ def max_x(hv_x: float, n_outputs: int) -> float:
     use this to size the canvas width.
     """
     body_x = hv_x + _JOG_OFFSET
-    return body_x + _OUTPUT_PITCH * n_outputs + 50
+    half_width = max(_OUTPUT_PITCH * (n_outputs - 1) / 2, 20)
+    return body_x + half_width + 60
 
 
 def draw(xfmr_name: str, hv_point, lv_kv: float, lv_outputs: list, band_top: float) -> list:
@@ -91,13 +92,12 @@ def draw(xfmr_name: str, hv_point, lv_kv: float, lv_outputs: list, band_top: flo
     elements.append(svg_line(body_x, symbol_y + _RADIUS, body_x, bus_y, stroke="#333", stroke_width=2))
 
     n = len(lv_outputs)
-    # Offset clear of body_x (never centered on/through it) -- see this
-    # module's header for why.
-    start_x = body_x + _OUTPUT_PITCH
-    end_x = start_x + (n - 1) * _OUTPUT_PITCH
-    elements.append(svg_line(body_x, bus_y, end_x, bus_y, stroke="#333", stroke_width=3))
-    elements.append(svg_text(end_x + 10, bus_y + 4, "%g kV" % lv_kv, font_size=10, fill="#666"))
+    bus_half_width = max(_OUTPUT_PITCH * (n - 1) / 2, 20)
+    elements.append(svg_line(body_x - bus_half_width, bus_y, body_x + bus_half_width, bus_y,
+                              stroke="#333", stroke_width=3))
+    elements.append(svg_text(body_x + bus_half_width + 10, bus_y + 4, "%g kV" % lv_kv, font_size=10, fill="#666"))
 
+    start_x = body_x - _OUTPUT_PITCH * (n - 1) / 2
     for i, tap in enumerate(lv_outputs):
         x = start_x + i * _OUTPUT_PITCH
         elements.append(svg_line(x, bus_y, x, output_y, stroke="#333", stroke_width=2))
