@@ -5,9 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from generator.topology import Tap, TapKind
-from generator.layouts import breaker_and_half, single_bus, main_and_transfer, ring_bus
+from generator.layouts import breaker_and_half, single_bus, main_and_transfer, ring_bus, transformer_lv
 from generator.derive import remote_trips_for, illustrative_interlocks
-from generator.topology import Transformer
 
 
 def _taps(*specs):
@@ -15,69 +14,74 @@ def _taps(*specs):
 
 
 def _switchyard_transformer():
-    """Rebuild switchyard.scd's own topology: 2 diameters, XFMR1 bridging
-    N2 (V800 HV tap) and N3 (V230 LV tap)."""
+    """Rebuild switchyard.scd's own topology: 2 diameters in one real
+    switchyard (V800), XFMR1 tapping N2 (its HV tap) with a simple LV
+    output stub (see generator/layouts/transformer_lv.py) -- never a
+    second real switchyard.
+    """
     hv_taps = _taps(("Line1", TapKind.LINE), ("XfmrHV", TapKind.TRANSFORMER))
-    lv_taps = _taps(("XfmrLV", TapKind.TRANSFORMER), ("Feed1", TapKind.FEEDER))
     hv_vl = breaker_and_half.build("V800", 800, hv_taps, start_index=1)
-    lv_vl = breaker_and_half.build("V230", 230, lv_taps, start_index=4)
-    xfmr = Transformer(
-        name="XFMR1", hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_taps[1]),
-        lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_taps[0]),
+    hv_tap = hv_vl.tap_node_for(hv_taps[1])
+    xfmr = transformer_lv.build_transformer(
+        "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
     )
-    return hv_vl, lv_vl, xfmr
+    return hv_vl, xfmr
 
 
 class TestRemoteTripsBreakerAndHalf(unittest.TestCase):
-    def test_reproduces_switchyard_scd_four_breaker_fanout(self):
-        hv_vl, lv_vl, xfmr = _switchyard_transformer()
+    def test_reproduces_switchyard_scd_two_breaker_fanout(self):
+        hv_vl, xfmr = _switchyard_transformer()
         trips = remote_trips_for(xfmr)
         names = sorted(b.name for b in trips)
-        # CB2/CB3 bound the HV tap (N2); CB4/CB5 bound the LV tap (N3).
-        self.assertEqual(names, ["CB2", "CB3", "CB4", "CB5"])
+        # CB2/CB3 bound the HV tap (N2) -- the LV side has no IED to trip.
+        self.assertEqual(names, ["CB2", "CB3"])
 
 
 class TestRemoteTripsSingleBus(unittest.TestCase):
     def test_only_one_breaker_bounds_a_tap(self):
         hv_taps = _taps(("XfmrHV", TapKind.TRANSFORMER))
-        lv_taps = _taps(("XfmrLV", TapKind.TRANSFORMER))
         hv_vl = single_bus.build("V800", 800, hv_taps)
-        lv_vl = single_bus.build("V230", 230, lv_taps, start_index=2)
-        xfmr = Transformer(
-            name="XFMR1", hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_taps[0]),
-            lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_taps[0]),
+        hv_tap = hv_vl.tap_node_for(hv_taps[0])
+        xfmr = transformer_lv.build_transformer(
+            "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
         )
         trips = remote_trips_for(xfmr)
-        self.assertEqual(sorted(b.name for b in trips), ["CB1", "CB2"])
+        self.assertEqual(sorted(b.name for b in trips), ["CB1"])
 
 
 class TestRemoteTripsRingBus(unittest.TestCase):
     def test_two_breakers_bound_a_ring_tap(self):
         hv_taps = _taps(("Line1", TapKind.LINE), ("Line2", TapKind.LINE), ("XfmrHV", TapKind.TRANSFORMER))
-        lv_taps = _taps(("Feed1", TapKind.FEEDER), ("Feed2", TapKind.FEEDER), ("XfmrLV", TapKind.TRANSFORMER))
         hv_vl = ring_bus.build("V800", 800, hv_taps)
-        lv_vl = ring_bus.build("V230", 230, lv_taps, start_index=4)
-        xfmr = Transformer(
-            name="XFMR1", hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_taps[2]),
-            lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_taps[2]),
+        hv_tap = hv_vl.tap_node_for(hv_taps[2])
+        xfmr = transformer_lv.build_transformer(
+            "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
         )
         trips = remote_trips_for(xfmr)
-        self.assertEqual(len(trips), 4)
+        self.assertEqual(len(trips), 2)
 
 
 class TestIllustrativeInterlocksBreakerAndHalf(unittest.TestCase):
     def test_reproduces_switchyard_scd_pairs_exactly(self):
-        hv_vl, lv_vl, _ = _switchyard_transformer()
+        hv_vl, _ = _switchyard_transformer()
         hv_pairs = illustrative_interlocks(hv_vl)
-        lv_pairs = illustrative_interlocks(lv_vl)
         self.assertEqual([(a.name, b.name) for a, b in hv_pairs], [("CB1", "CB2")])
-        self.assertEqual([(a.name, b.name) for a, b in lv_pairs], [("CB4", "CB5")])
 
     def test_does_not_also_interlock_the_second_breaker_pair(self):
-        hv_vl, _, _ = _switchyard_transformer()
+        hv_vl, _ = _switchyard_transformer()
         pairs = illustrative_interlocks(hv_vl)
         involved = {name for pair in pairs for name in (pair[0].name, pair[1].name)}
         self.assertNotIn("CB3", involved)  # CB2<->CB3 must NOT also appear
+
+
+class TestIllustrativeInterlocksTransformerLv(unittest.TestCase):
+    def test_lv_stub_never_produces_interlocks(self):
+        # Every LV output tap is bounded by exactly 1 DIS, never 2
+        # breakers -- the LV stub is not a junction, so it can never
+        # qualify under illustrative_interlocks' "exactly 2 bounding
+        # breakers" rule.
+        _, xfmr = _switchyard_transformer()
+        self.assertEqual(illustrative_interlocks(xfmr.lv_vl), [])
 
 
 class TestIllustrativeInterlocksNoJunction(unittest.TestCase):

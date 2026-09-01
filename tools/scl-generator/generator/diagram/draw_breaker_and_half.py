@@ -2,7 +2,11 @@
 bus rails (top/bottom), each diameter drawn as a zigzag string between
 them -- CB_a from the top rail down to a waist, CB_mid as a horizontal
 jumper across the waist to the second tap's column, CB_b from there down
-to the bottom rail. Each tap's symbol sits at its own waist junction.
+to the bottom rail. Each tap's symbol sits at its own waist junction. A
+disconnect tick sits on each outer leg between its bus rail and CB_a/
+CB_b (matching the reference one-line's Disc. switch -> Circuit breaker
+ordering); the middle jumper breaker (CB_mid, the diameter's own "tie")
+has no disconnect of its own.
 """
 
 from ..topology import VoltageLevelBuild
@@ -40,9 +44,14 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
         elements.append(svg_circle(x0, top_y, 3, fill="#333"))
         elements.append(svg_circle(x1, bot_y, 3, fill="#333"))
 
-        _breaker(elements, x0, (top_y + waist_y) / 2, cb_a.name, vertical=True)
+        cb_a_y = (top_y + waist_y) / 2
+        cb_b_y = (waist_y + bot_y) / 2
+        elements.extend(tap_symbols.draw_disconnect(x0, top_y + (cb_a_y - top_y) / 2, vertical=True))
+        elements.extend(tap_symbols.draw_disconnect(x1, bot_y - (bot_y - cb_b_y) / 2, vertical=True))
+
+        _breaker(elements, x0, cb_a_y, cb_a.name, vertical=True)
         _breaker(elements, (x0 + x1) / 2, waist_y, cb_mid.name, vertical=False)
-        _breaker(elements, x1, (waist_y + bot_y) / 2, cb_b.name, vertical=True)
+        _breaker(elements, x1, cb_b_y, cb_b.name, vertical=True)
 
         elements.extend(tap_symbols.draw(x0, waist_y, -1, tap0.kind))
         elements.append(svg_text(x0, waist_y - 26, tap0.name, text_anchor="middle", font_size=11))

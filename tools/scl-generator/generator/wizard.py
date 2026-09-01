@@ -8,10 +8,10 @@ session transcript.
 
 from . import prompts, naming
 from .topology import (
-    Tap, TapKind, LayoutKind, Transformer, Station,
+    Tap, TapKind, LayoutKind, Station,
     ProtectionDefaults, NetworkDefaults, IedSettingsDefaults, ScadaDefaults,
 )
-from .layouts import LAYOUT_BUILDERS
+from .layouts import LAYOUT_BUILDERS, transformer_lv
 
 _LAYOUT_MENU = [
     (LayoutKind.BREAKER_AND_HALF, "1½-breaker",
@@ -27,7 +27,15 @@ _LAYOUT_MENU = [
 _TAP_KIND_MENU = [
     (TapKind.LINE, "line", "An incoming/outgoing transmission line."),
     (TapKind.FEEDER, "feeder", "An outgoing distribution feeder."),
-    (TapKind.TRANSFORMER, "transformer", "A power transformer winding terminal (paired up later)."),
+    (TapKind.TRANSFORMER, "transformer",
+     "A step-down transformer tapping into this switchyard -- its LV side "
+     "is a simple disconnect-only output, asked right after this, never "
+     "a second switchyard."),
+]
+
+_LV_OUTPUT_KIND_MENU = [
+    (TapKind.FEEDER, "feeder", "An outgoing distribution feeder."),
+    (TapKind.LINE, "line", "An outgoing transmission line."),
 ]
 
 # The real curve name set (sas/protection/curves.lua's FORMULAS table)
@@ -47,14 +55,47 @@ _CURVE_MENU = [
 ]
 
 
-def _collect_taps():
+def _collect_transformer_lv_spec(default_xfmr_num: int, hv_kv: float):
+    """Asked immediately when a tap is marked kind=transformer -- its LV
+    side is a small, fixed disconnect-only structure (see
+    generator/layouts/transformer_lv.py), never a second switchyard, so
+    there's no separate "pair it up later" step anymore. Returns
+    (xfmr_name, lv_kv, lv_outputs) where lv_outputs is a list of
+    (name, TapKind) pairs.
+    """
+    print("    -- this transformer's LV side (a simple output, not another switchyard) --")
+    name = prompts.ask_str("    Transformer name", default="XFMR%d" % default_xfmr_num,
+                            validate=naming.validate_ied_name)
+    lv_kv = prompts.ask_float("    LV nominal kV", min_value=0)
+    while lv_kv >= hv_kv:
+        print("      must be lower than this switchyard's %g kV" % hv_kv)
+        lv_kv = prompts.ask_float("    LV nominal kV", min_value=0)
+    n_outputs = prompts.ask_int("    Number of simple LV outputs (disconnect-gated exits)",
+                                 default=1, min_value=1)
+    outputs = []
+    for i in range(1, n_outputs + 1):
+        out_name = prompts.ask_str("      Output %d name" % i, default="Feed%d" % i,
+                                    validate=naming.validate_identifier)
+        out_kind = prompts.ask_choice("      Output %d kind?" % i, _LV_OUTPUT_KIND_MENU)
+        outputs.append((out_name, out_kind))
+    return name, lv_kv, outputs
+
+
+def _collect_taps(hv_kv: float, xfmr_start_index: int):
+    """Returns (taps, lv_specs): `lv_specs[i]` is the (xfmr_name, lv_kv,
+    lv_outputs) tuple for `taps[i]` when it's a transformer tap, else
+    None -- kept as a parallel list rather than a dict keyed by Tap
+    (Tap's default dataclass equality makes it unhashable).
+    """
     taps = []
+    lv_specs = []
     tap_num = 0
+    xfmr_num = xfmr_start_index
     while True:
         tap_num += 1
         raw_name = input("  Tap %d name (blank to finish this voltage level): " % tap_num).strip()
         if not raw_name:
-            return taps
+            return taps, lv_specs
         try:
             naming.validate_identifier(raw_name)
         except naming.NameError_ as e:
@@ -63,9 +104,14 @@ def _collect_taps():
             continue
         kind = prompts.ask_choice("  Tap kind?", _TAP_KIND_MENU)
         taps.append(Tap(raw_name, kind))
+        if kind == TapKind.TRANSFORMER:
+            lv_specs.append(_collect_transformer_lv_spec(xfmr_num, hv_kv))
+            xfmr_num += 1
+        else:
+            lv_specs.append(None)
 
 
-def _build_voltage_level(vl_num: int, start_index: int):
+def _build_voltage_level(vl_num: int, start_index: int, xfmr_start_index: int):
     print("\n--- Voltage level %d ---" % vl_num)
     vl_name = prompts.ask_str("Voltage level name", default="V%d" % vl_num,
                                validate=naming.validate_identifier)
@@ -73,78 +119,42 @@ def _build_voltage_level(vl_num: int, start_index: int):
     layout_kind = prompts.ask_choice("Layout kind for this voltage level?", _LAYOUT_MENU)
 
     while True:
-        taps = _collect_taps()
+        taps, lv_specs = _collect_taps(kv, xfmr_start_index)
         builder = LAYOUT_BUILDERS[layout_kind]
         try:
-            return builder(vl_name, kv, taps, start_index=start_index)
+            vl = builder(vl_name, kv, taps, start_index=start_index)
+            break
         except ValueError as e:
             print("  %s -- let's redo this voltage level's taps." % e)
+
+    transformers = []
+    for tap, spec in zip(taps, lv_specs):
+        if spec is None:
+            continue
+        xfmr_name, lv_kv, outputs = spec
+        hv_tap = vl.tap_node_for(tap)
+        xfmr = transformer_lv.build_transformer(xfmr_name, vl, hv_tap, lv_kv, outputs)
+        print("  %s: HV scale %.3f, LV scale %.3f" % (xfmr.name, xfmr.scale_hv, xfmr.scale_lv))
+        transformers.append(xfmr)
+
+    return vl, transformers
 
 
 def _collect_voltage_levels():
     vls = []
+    all_transformers = []
     breaker_index = 1
+    xfmr_index = 1
     vl_num = 0
     while True:
         vl_num += 1
-        vl = _build_voltage_level(vl_num, breaker_index)
+        vl, transformers = _build_voltage_level(vl_num, breaker_index, xfmr_index)
         vls.append(vl)
+        all_transformers.extend(transformers)
         breaker_index += len(vl.breakers)
+        xfmr_index += len(transformers)
         if not prompts.ask_yes_no("\nAdd another voltage level?", default=False):
-            return vls
-
-
-def _collect_transformers(vls):
-    unclaimed = [(vl, tap) for vl in vls for tap in vl.taps if tap.kind == TapKind.TRANSFORMER]
-    if not unclaimed:
-        return []
-
-    print("\n--- Transformers ---")
-    print("%d unclaimed transformer tap(s) need pairing into transformers." % len(unclaimed))
-    transformers = []
-    xfmr_num = 0
-    while unclaimed:
-        xfmr_num += 1
-        name = prompts.ask_str("Transformer name", default="XFMR%d" % xfmr_num,
-                                validate=naming.validate_ied_name)
-
-        hv_menu = [((vl, tap), "%s / %s (%g kV)" % (vl.vl_name, tap.name, vl.kv), "")
-                   for vl, tap in unclaimed]
-        hv_vl, hv_tap = prompts.ask_choice("  Pick the HV-side tap:", hv_menu)
-
-        lv_candidates = [(vl, tap) for vl, tap in unclaimed if vl is not hv_vl]
-        if not lv_candidates:
-            print("  No other voltage level has an unclaimed transformer tap left to pair "
-                  "%s/%s with -- leaving it unclaimed." % (hv_vl.vl_name, hv_tap.name))
-            unclaimed.remove((hv_vl, hv_tap))
-            xfmr_num -= 1
-            continue
-        lv_menu = [((vl, tap), "%s / %s (%g kV)" % (vl.vl_name, tap.name, vl.kv), "")
-                   for vl, tap in lv_candidates]
-        lv_vl, lv_tap = prompts.ask_choice("  Pick the LV-side tap:", lv_menu)
-
-        if hv_vl.kv <= lv_vl.kv:
-            print("  %s (%gkV) is not higher than %s (%gkV) -- swapping HV/LV."
-                  % (hv_vl.vl_name, hv_vl.kv, lv_vl.vl_name, lv_vl.kv))
-            hv_vl, hv_tap, lv_vl, lv_tap = lv_vl, lv_tap, hv_vl, hv_tap
-
-        xfmr = Transformer(
-            name=name, hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_tap),
-            lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_tap),
-        )
-        transformers.append(xfmr)
-        print("  %s: HV scale %.3f, LV scale %.3f" % (xfmr.name, xfmr.scale_hv, xfmr.scale_lv))
-        unclaimed.remove((hv_vl, hv_tap))
-        unclaimed.remove((lv_vl, lv_tap))
-
-    if unclaimed:
-        names = ", ".join("%s/%s" % (vl.vl_name, tap.name) for vl, tap in unclaimed)
-        raise RuntimeError(
-            "Transformer taps left unpaired: %s -- re-run the wizard and either give them "
-            "a matching partner tap on a different voltage level, or make them line/feeder "
-            "taps instead." % names
-        )
-    return transformers
+            return vls, all_transformers
 
 
 def _collect_protection_defaults() -> ProtectionDefaults:
@@ -242,8 +252,9 @@ def _print_summary(station: Station):
               % (vl.vl_name, vl.kv, vl.layout_kind.value, len(vl.taps), len(vl.breakers)))
     print("Transformers: %d" % len(station.transformers))
     for xfmr in station.transformers:
-        print("  %s: %s (%gkV) <-> %s (%gkV)"
-              % (xfmr.name, xfmr.hv_vl.vl_name, xfmr.hv_vl.kv, xfmr.lv_vl.vl_name, xfmr.lv_vl.kv))
+        n_outputs = len(xfmr.lv_vl.taps)
+        print("  %s: HV tap in %s (%gkV) -> LV %gkV, %d simple output(s)"
+              % (xfmr.name, xfmr.hv_vl.vl_name, xfmr.hv_vl.kv, xfmr.lv_vl.kv, n_outputs))
     print("Total breaker IEDs: %d" % n_breakers)
     print("SCADA IED: %s" % station.scada.ied_name)
 
@@ -262,8 +273,7 @@ def run_wizard() -> "Station | None":
     print("Answers with a default shown in [brackets] can be left blank.\n")
 
     station_name = prompts.ask_str("Substation name", validate=naming.validate_identifier)
-    voltage_levels = _collect_voltage_levels()
-    transformers = _collect_transformers(voltage_levels)
+    voltage_levels, transformers = _collect_voltage_levels()
     protection = _collect_protection_defaults()
     network = _collect_network_defaults()
     ied_settings = _collect_ied_settings_defaults()

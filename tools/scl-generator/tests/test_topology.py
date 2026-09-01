@@ -6,8 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from generator.topology import (
     Tap, TapKind, TapNode, BusNode, Breaker, VoltageLevelBuild,
-    Transformer, LayoutKind, Station,
+    LayoutKind, Station,
 )
+from generator.layouts import transformer_lv
 
 
 def _vl(name, kv, tap_names):
@@ -62,32 +63,38 @@ class TestVoltageLevelBuild(unittest.TestCase):
 
 
 class TestTransformer(unittest.TestCase):
+    """Transformers are now built through
+    generator/layouts/transformer_lv.py's build_transformer -- its LV
+    side is always a freshly built, non-redundant stub (never a second
+    independently-laid-out switchyard), so there is no "same voltage
+    level" or "same VL object" case to guard against any more.
+    """
+
     def test_scale_matches_worked_example(self):
         hv_vl = _vl("V800", 800, ["XfmrHV"])
-        lv_vl = _vl("V230", 230, ["XfmrLV"])
-        xfmr = Transformer(
-            name="XFMR1", hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_vl.taps[0]),
-            lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_vl.taps[0]),
+        hv_tap = hv_vl.tap_node_for(hv_vl.taps[0])
+        xfmr = transformer_lv.build_transformer(
+            "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
         )
         self.assertEqual(xfmr.scale_hv, 1.0)
         self.assertAlmostEqual(xfmr.scale_lv, 800 / 230, places=3)
 
     def test_rejects_hv_not_higher_than_lv(self):
-        vl_a = _vl("V230a", 230, ["Tap1"])
-        vl_b = _vl("V230b", 230, ["Tap2"])
+        hv_vl = _vl("V230", 230, ["XfmrHV"])
+        hv_tap = hv_vl.tap_node_for(hv_vl.taps[0])
         with self.assertRaises(ValueError):
-            Transformer(
-                name="XFMR1", hv_vl=vl_a, hv_tap=vl_a.tap_node_for(vl_a.taps[0]),
-                lv_vl=vl_b, lv_tap=vl_b.tap_node_for(vl_b.taps[0]),
+            transformer_lv.build_transformer(
+                "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
             )
 
-    def test_rejects_same_voltage_level(self):
-        vl = _vl("V800", 800, ["Tap1", "Tap2"])
-        with self.assertRaises(ValueError):
-            Transformer(
-                name="XFMR1", hv_vl=vl, hv_tap=vl.tap_node_for(vl.taps[0]),
-                lv_vl=vl, lv_tap=vl.tap_node_for(vl.taps[1]),
-            )
+    def test_lv_side_is_a_distinct_non_selectable_stub(self):
+        hv_vl = _vl("V800", 800, ["XfmrHV"])
+        hv_tap = hv_vl.tap_node_for(hv_vl.taps[0])
+        xfmr = transformer_lv.build_transformer(
+            "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
+        )
+        self.assertIsNot(xfmr.lv_vl, hv_vl)
+        self.assertEqual(xfmr.lv_vl.layout_kind, LayoutKind.TRANSFORMER_LV)
 
 
 class TestStation(unittest.TestCase):

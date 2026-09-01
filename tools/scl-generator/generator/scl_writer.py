@@ -125,6 +125,22 @@ def _build_data_type_templates(root):
 # the diagram generator's same Station object).
 # --------------------------------------------------------------------
 
+def _all_voltage_levels(station: Station):
+    """Every VoltageLevel this document needs an element for: the real,
+    user-chosen switchyards (station.voltage_levels) plus each
+    transformer's own small LV stub (xfmr.lv_vl) -- the latter is
+    deliberately NOT part of station.voltage_levels itself (see
+    generator/layouts/transformer_lv.py's header), so both writer-side
+    concerns that need "every VL" (node-path computation, VoltageLevel
+    element emission) go through this one helper instead of duplicating
+    the "plus every transformer's lv_vl" logic twice.
+    """
+    for vl in station.voltage_levels:
+        yield vl
+    for xfmr in station.transformers:
+        yield xfmr.lv_vl
+
+
 def _compute_node_paths(station: Station) -> Dict[Node, str]:
     """Every node's full SCL pathName, keyed by the Node object itself
     (Node has eq=False -- identity hashing -- so this is a safe dict
@@ -132,7 +148,7 @@ def _compute_node_paths(station: Station) -> Dict[Node, str]:
     `name`).
     """
     paths: Dict[Node, str] = {}
-    for vl in station.voltage_levels:
+    for vl in _all_voltage_levels(station):
         for bay in vl.bays:
             for node in bay.connectivity_nodes:
                 paths[node] = "%s/%s/%s/%s" % (station.name, vl.vl_name, bay.name, node.name)
@@ -145,7 +161,7 @@ def _build_substation(root, station: Station, node_paths: Dict[Node, str]):
     for xfmr in station.transformers:
         _build_transformer_element(substation, xfmr, node_paths)
 
-    for vl in station.voltage_levels:
+    for vl in _all_voltage_levels(station):
         _build_voltage_level(substation, vl, node_paths)
 
 
@@ -174,7 +190,7 @@ def _build_bay(vl_elem, bay: BayGroup, node_paths):
     bay_elem = _el(vl_elem, "Bay", bay_attrib)
 
     for breaker in bay.breakers:
-        ce = _el(bay_elem, "ConductingEquipment", {"name": breaker.name, "type": "CBR"})
+        ce = _el(bay_elem, "ConductingEquipment", {"name": breaker.name, "type": breaker.equip_type})
         _el(ce, "Terminal", {"connectivityNode": node_paths[breaker.node_a], "cNodeName": breaker.node_a.name})
         _el(ce, "Terminal", {"connectivityNode": node_paths[breaker.node_b], "cNodeName": breaker.node_b.name})
 
@@ -360,8 +376,9 @@ def _build_transformer_ied(root, station: Station, xfmr: Transformer):
     ied = _el(root, "IED", {
         "name": xfmr.name,
         "desc": "Dedicated transformer differential-protection IED -- HV+LV CT meters, "
-                "no breaker of its own; trips the breakers bounding its taps via "
-                "remoteTrips[] on those IEDs",
+                "no breaker of its own; trips the breaker(s) bounding its HV tap via "
+                "remoteTrips[] on those IEDs (its LV side is disconnect-only, no IED "
+                "to remotely trip)",
     })
     ap = _el(ied, "AccessPoint", {"name": "AP1"})
     server = _el(ap, "Server")

@@ -19,18 +19,16 @@ _DRAWERS = {
 
 def render(station: Station) -> str:
     # Highest kV on top, matching real single-line-diagram convention.
+    # Only REAL, user-chosen switchyards get a strip -- a transformer's
+    # LV side is never one (see generator/layouts/transformer_lv.py).
     ordered_vls = sorted(station.voltage_levels, key=lambda vl: vl.kv, reverse=True)
 
     elements = []
-    tap_positions = {}          # TapNode -> (x, y), across every VL
-    strip_bottom_y = {}         # vl_name -> y of the strip's bottom edge
-    strip_top_y = {}            # vl_name -> y of the strip's top edge
+    tap_positions = {}          # TapNode -> (x, y), across every real strip
 
     max_width = 0.0
     for rank, vl in enumerate(ordered_vls):
         top = geo.strip_y0(rank)
-        strip_top_y[vl.vl_name] = top
-        strip_bottom_y[vl.vl_name] = top + geo.STRIP_HEIGHT
 
         drawer = _DRAWERS[vl.layout_kind]
         vl_elements, vl_tap_positions = drawer(vl, top)
@@ -44,15 +42,20 @@ def render(station: Station) -> str:
             width = geo.strip_width(n_slots) + geo.LEFT_MARGIN
         max_width = max(max_width, width)
 
+    # Every transformer's symbol+LV-output-fan hangs in one shared band
+    # below the bottom of every real strip -- see draw_transformer.py's
+    # header for why (and its documented simplification).
+    band_top = geo.total_height(len(ordered_vls)) - 20
     for xfmr in station.transformers:
         hv_point = tap_positions[xfmr.hv_tap]
-        lv_point = tap_positions[xfmr.lv_tap]
         elements.extend(draw_transformer.draw(
-            xfmr.name, hv_point, lv_point,
-            strip_bottom_y[xfmr.hv_vl.vl_name], strip_top_y[xfmr.lv_vl.vl_name],
+            xfmr.name, hv_point, xfmr.lv_vl.kv, xfmr.lv_vl.taps, band_top,
         ))
+        n = len(xfmr.lv_vl.taps)
+        fan_half_width = max(60 * (n - 1) / 2, 20) + 60
+        max_width = max(max_width, hv_point[0] + fan_half_width)
 
-    height = geo.total_height(len(ordered_vls))
+    height = band_top + (draw_transformer.band_height() if station.transformers else 0) + 20
     title = [svg_text(max_width / 2, 30, station.name, text_anchor="middle", font_size=20, font_weight="bold")]
 
     body = "\n".join(title + elements)

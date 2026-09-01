@@ -27,15 +27,22 @@ class LayoutKind(Enum):
     SINGLE_BUS = "single_bus"
     MAIN_AND_TRANSFER = "main_and_transfer"
     RING_BUS = "ring_bus"
+    # Not user-selectable -- generator/layouts/transformer_lv.py's fixed,
+    # non-redundant shape for a transformer's LV side (see that module's
+    # header for why this deliberately isn't one of the 4 layouts above).
+    TRANSFORMER_LV = "transformer_lv"
 
 
 @dataclass
 class Tap:
     """One bay's worth of intent, before any layout has turned it into
     breakers/nodes: "there is a line/feeder/transformer connection here,
-    named X." `TapKind.TRANSFORMER` taps are left unresolved by the
-    layout builders -- generator/wizard.py's transformer step pairs them
-    into `Transformer` objects afterward.
+    named X." A `TapKind.TRANSFORMER` tap's HV side is built by the same
+    layout builder as every other tap in its switchyard; its LV side is
+    built separately and immediately (see generator/wizard.py) via
+    generator/layouts/transformer_lv.py -- there is no "unclaimed pool
+    pairing" step anymore (a transformer's LV side is never another
+    independently-laid-out switchyard; see that module's header for why).
     """
     name: str
     kind: TapKind
@@ -79,15 +86,28 @@ class TapNode(Node):
             raise ValueError("TapNode requires a tap")
 
 
+#: Real SCL tCommonConductingEquipmentEnum values this tool emits.
+#: CBR = circuit breaker (gets a full protection/control IED). DIS =
+#: disconnect switch (descriptive topology only -- no IED, no remote
+#: control/monitoring; matches real "manual/local" disconnect practice
+#: and this tool's transformer-LV-output convention specifically).
+EQUIP_CBR = "CBR"
+EQUIP_DIS = "DIS"
+
+
 @dataclass(eq=False)
 class Breaker:
-    """A `ConductingEquipment type="CBR"` with exactly two terminals --
-    real SCL's own `Terminal` cardinality limit (0..2), never more.
-    Identity equality (`eq=False`), same reasoning as Node.
+    """A `ConductingEquipment` with exactly two terminals -- real SCL's
+    own `Terminal` cardinality limit (0..2), never more. Despite the
+    name (kept for historical/API-stability reasons -- most instances
+    really are breakers), `equip_type` may also be `EQUIP_DIS` for a
+    disconnect switch; see EQUIP_CBR/EQUIP_DIS above. Identity equality
+    (`eq=False`), same reasoning as Node.
     """
     name: str
     node_a: Node
     node_b: Node
+    equip_type: str = EQUIP_CBR
 
     def other_node(self, node: Node) -> Node:
         if node is self.node_a:
@@ -131,28 +151,33 @@ class VoltageLevelBuild:
 
 @dataclass
 class Transformer:
-    """Spans exactly two voltage levels (HV/LV), each terminating at one
-    of that VL's own TapNodes (produced by that VL's own layout builder,
-    kind=TRANSFORMER). `scale_lv`/`scale_hv` are the PDIF differential
-    turns-ratio inputs -- always derived from the two VLs' kV, never
-    asked in the wizard (matches switchyard.scd's XFMR1: HV scale 1.0,
-    LV scale 800/230 = 3.478...).
+    """A tap into exactly one real switchyard (`hv_vl`/`hv_tap`, built by
+    whichever layout the user chose for that switchyard -- same as any
+    Line/Feeder tap) whose LV side is a small, fixed, non-redundant
+    structure (`lv_vl`/`lv_tap`, built by
+    generator/layouts/transformer_lv.py, never a second independently-
+    laid-out switchyard -- see that module's header for the real-
+    substation reasoning). `lv_vl` still has the shape of a
+    VoltageLevelBuild so scl_writer.py/diagram code can treat it
+    uniformly for node-path/coordinate purposes, but its `layout_kind` is
+    the non-selectable `LayoutKind.TRANSFORMER_LV` sentinel and it is
+    NEVER added to `Station.voltage_levels` (see generator/wizard.py).
+
+    `scale_lv`/`scale_hv` are the PDIF differential turns-ratio inputs --
+    always derived from HV/LV kV, never asked in the wizard (matches
+    scl/switchyard.scd's XFMR1: HV scale 1.0, LV scale 800/230 = 3.478).
     """
     name: str
     hv_vl: VoltageLevelBuild
     hv_tap: TapNode
     lv_vl: VoltageLevelBuild
-    lv_tap: TapNode
+    lv_tap: Node
 
     def __post_init__(self):
         if self.hv_vl.kv <= self.lv_vl.kv:
             raise ValueError(
                 "Transformer %r: hv_vl (%skV) must be strictly higher than "
-                "lv_vl (%skV)" % (self.name, self.hv_vl.kv, self.lv_vl.kv)
-            )
-        if self.hv_vl is self.lv_vl:
-            raise ValueError(
-                "Transformer %r: HV and LV taps must be on different voltage levels" % (self.name,)
+                "its LV side (%skV)" % (self.name, self.hv_vl.kv, self.lv_vl.kv)
             )
 
     @property

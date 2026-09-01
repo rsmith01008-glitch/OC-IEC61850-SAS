@@ -14,6 +14,25 @@ use this tool for a *new* station, or as a starting point you then
 hand-edit -- the generated `.scd` is a normal SCL file, not a
 compiler-owned artifact you must regenerate on every change.
 
+**Architecture note:** a transformer taps into exactly *one* real
+switchyard (its HV side, built by whichever layout you chose for that
+voltage level, same as any line/feeder tap); its LV side is always a
+small, fixed, disconnect-only output stub -- never a second
+independently-laid-out switchyard. This matches real substation
+practice: redundant double-bus switching infrastructure (1½-breaker,
+ring bus, etc.) belongs on the transmission side, shared by multiple
+lines and any transformers tapping it; a transformer's LV side doesn't
+typically get a matching double-bus arrangement at the *same* site,
+because the next step-down happens closer to the point of use, at a
+different substation. It also keeps transformer differential protection
+(PDIF) honest: that zone is bounded by the transformer's HV-side CT (at
+the breaker(s) bounding its HV tap) and its own LV-side CT, right at its
+output -- not spanning a second switchyard. See
+`generator/layouts/transformer_lv.py`'s header for the full reasoning.
+(`scl/switchyard.scd` itself still predates this fix and uses the older
+two-switchyard-joined-by-transformer shape -- it's hand-authored and out
+of this tool's scope, so it hasn't been updated to match.)
+
 ## Install
 
 ```
@@ -39,8 +58,9 @@ vendored schema, and offers to compile it immediately via the real
 
 ## Example session (abridged)
 
-Reproducing something close to `scl/switchyard.scd`'s own topology --
-two 1½-breaker voltage levels joined by one transformer:
+One 1½-breaker 800kV switchyard with a transformer tapping one diameter
+-- its LV side is a simple 230kV disconnect-gated output, asked inline
+the moment the tap is marked "transformer," not a second switchyard:
 
 ```
 === OC-IEC61850-SAS SCL generator ===
@@ -59,31 +79,17 @@ Choice [1]:
   Tap kind? Choice [1]:                  # 1 = line
   Tap 2 name (blank to finish this voltage level): XfmrHV
   Tap kind? Choice [1]: 3                # 3 = transformer
-  Tap 3 name (blank to finish this voltage level):
-Add another voltage level? [y/N]: y
-
---- Voltage level 2 ---
-Voltage level name [V2]: V230
-Nominal kV: 230
-Layout kind for this voltage level?
-Choice [1]:
-  Tap 1 name: XfmrLV
-  Tap kind? Choice [1]: 3
-  Tap 2 name: Feed1
-  Tap kind? Choice [1]: 2                # 2 = feeder
-  Tap 3 name:
-Add another voltage level? [y/N]:
-
---- Transformers ---
-2 unclaimed transformer tap(s) need pairing into transformers.
-Transformer name [XFMR1]:
-  Pick the HV-side tap:
-  *1) V800 / XfmrHV (800 kV)
-Choice [1]:
-  Pick the LV-side tap:
-  *1) V230 / XfmrLV (230 kV)
-Choice [1]:
+    -- this transformer's LV side (a simple output, not another switchyard) --
+    Transformer name [XFMR1]:
+    LV nominal kV: 230
+    Number of simple LV outputs (disconnect-gated exits) [1]:
+      Output 1 name [Feed1]:
+      Output 1 kind? Choice [1]:         # 1 = feeder
+  Tap 3 name (blank to finish this voltage level): Line2
+  Tap kind? Choice [1]:
+  Tap 4 name (blank to finish this voltage level):
   XFMR1: HV scale 1.000, LV scale 3.478
+Add another voltage level? [y/N]:
 
 --- Protection defaults (applied to every breaker/transformer) ---
 PTOC pickup (amps) [1.2]:
@@ -92,10 +98,9 @@ PTOC curve? Choice [1]:                  # IEC_VERY_INVERSE
 
 --- Summary ---
 Substation: Switchyard1
-  V800: 800 kV, breaker_and_half, 2 tap(s), 3 breaker(s)
-  V230: 230 kV, breaker_and_half, 2 tap(s), 3 breaker(s)
+  V800: 800 kV, breaker_and_half, 4 tap(s), 6 breaker(s)
 Transformers: 1
-  XFMR1: V800 (800kV) <-> V230 (230kV)
+  XFMR1: HV tap in V800 (800kV) -> LV 230kV, 1 simple output(s)
 Total breaker IEDs: 6
 SCADA IED: SCADA1
 
@@ -115,34 +120,44 @@ wrote etc/generated/sas-ied-cb1.cfg
 1. Substation name.
 2. **Per voltage level** (repeat until done): name, kV, layout kind (see
    below), then a **tap loop** (name + line/feeder/transformer kind,
-   repeat until blank) -- validated and built immediately on finishing
-   that voltage level's taps, so a bad tap count (see Scoping decisions)
-   is caught and re-asked right away, not at the very end.
-3. **Transformers** (skipped if no transformer-kind taps exist): pair up
-   each unclaimed transformer tap with one on a different, lower-kV
-   voltage level. The differential-protection turns-ratio `scale` is
-   always computed automatically (`HV_kV / LV_kV`) -- never asked.
-4. Protection defaults (PTOC pickup/curve/time-multiplier-or-definite-
+   repeat until blank). Marking a tap "transformer" immediately asks a
+   few nested questions right there -- transformer name, LV kV, and one
+   or more simple LV outputs (name + line/feeder kind) -- there is no
+   separate "Transformers" step afterward, since a transformer's LV side
+   is never paired up with another voltage level's tap (see the
+   Architecture note above). The whole voltage level (taps + any inline
+   transformer LV specs) is validated and built immediately on
+   finishing, so a bad tap count (see Scoping decisions) is caught and
+   re-asked right away, not at the very end.
+3. Protection defaults (PTOC pickup/curve/time-multiplier-or-definite-
    time/reset, PDIF min-pickup/restraint-slope) -- asked **once** for
-   the whole station, not per breaker/transformer.
-5. GOOSE/network defaults (multicast group/port, MMS addressing, MAC/
+   the whole station, not per breaker/transformer. The differential-
+   protection turns-ratio `scale` is always computed automatically
+   (`HV_kV / LV_kV`) -- never asked.
+4. GOOSE/network defaults (multicast group/port, MMS addressing, MAC/
    APPID/VLAN, GOOSE timing).
-6. IED settings defaults (tick interval, integrity, GOOSE stale-after,
+5. IED settings defaults (tick interval, integrity, GOOSE stale-after,
    ports).
-7. SCADA settings (IED name, historian, auto-generated alarms).
-8. A summary, then final confirmation before anything is written.
+6. SCADA settings (IED name, historian, auto-generated alarms).
+7. A summary, then final confirmation before anything is written.
 
 ## Auto-derived, not asked
 
 - **Remote trips**: every transformer's differential protection
-  (`PDIF1.Op`) automatically trips every breaker bounding either of its
-  two taps -- mechanically derived from the topology graph, not a
-  judgment call (`generator/derive.py`'s `remote_trips_for`).
+  (`PDIF1.Op`) automatically trips every breaker bounding its HV tap --
+  mechanically derived from the topology graph, not a judgment call
+  (`generator/derive.py`'s `remote_trips_for`). The LV side is
+  deliberately never considered: tripping the HV-side breaker(s) fully
+  de-energizes the transformer, and the LV outputs are plain `DIS`
+  disconnects with no IED of their own to receive a remote trip in the
+  first place.
 - **Illustrative interlocks**: one mutual interlock pair per diameter/
   ring junction (matching `scl/switchyard.scd`'s one-per-diameter
   pattern) -- a placeholder proving the cross-IED mechanism works, *not*
   a real site-specific interlock philosophy. Single-bus and
-  main-and-transfer layouts never produce any (see below).
+  main-and-transfer layouts never produce any (see below), and neither
+  does a transformer's LV stub -- every LV output is bounded by exactly
+  one `DIS`, never two breakers, so it can never qualify as a junction.
 
 ## Scoping decisions
 
@@ -174,7 +189,13 @@ wrote etc/generated/sas-ied-cb1.cfg
   no per-layout branching).
 - **The diagram is schematic, not IEC 60617-symbol-library-exact** --
   not to scale, coordinates chosen for legibility, not standards
-  compliance.
+  compliance. Every transformer's symbol and LV output fan is drawn in
+  one shared horizontal band below the bottom of all real switchyard
+  strips (never as a second strip of its own) -- if a transformer's HV
+  tap lives in a strip above another real strip, its connector is simply
+  a longer vertical line down to that shared band, and multiple
+  transformers close together in x are not collision-avoided beyond
+  that (see `generator/diagram/draw_transformer.py`'s header).
 - **No CLI-flag/answers-file scripting mode in this version** -- pure
   interactive `input()` only.
 

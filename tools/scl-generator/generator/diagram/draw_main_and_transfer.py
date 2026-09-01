@@ -36,6 +36,7 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
 
         elements.append(svg_circle(x, main_y, 3, fill="#333"))
         elements.append(svg_line(x, main_y, x, tap_y, stroke="#333", stroke_width=2))
+        elements.extend(tap_symbols.draw_disconnect(x, main_y + (mid_y - main_y) / 2, vertical=True))
         elements.append(svg_rect(x - geo.BREAKER_SIZE / 2, mid_y - geo.BREAKER_SIZE / 2,
                                   geo.BREAKER_SIZE, geo.BREAKER_SIZE, fill="white", stroke="#333", stroke_width=2))
 

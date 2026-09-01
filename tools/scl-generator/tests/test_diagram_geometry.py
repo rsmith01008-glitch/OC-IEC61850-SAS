@@ -5,7 +5,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from lxml import etree
+
 from generator.diagram import layout_geometry as geo
+from generator.diagram import draw_transformer, onelinediagram
+from generator.layouts import breaker_and_half, single_bus, transformer_lv
+from generator.topology import Tap, TapKind, Station
 
 
 class TestStripLayout(unittest.TestCase):
@@ -78,6 +83,57 @@ class TestRingGeometry(unittest.TestCase):
         cx, cy = geo.ring_center(strip_top=0.0, radius=90.0)
         self.assertAlmostEqual(cx, geo.LEFT_MARGIN + 90.0)
         self.assertAlmostEqual(cy, geo.STRIP_HEIGHT / 2)
+
+
+class TestTransformerBand(unittest.TestCase):
+    """draw_transformer.py draws a transformer's symbol+LV-output-fan in
+    a shared band below every real switchyard strip -- never a second
+    strip of its own (see that module's header)."""
+
+    def test_band_height_is_positive_and_fixed(self):
+        self.assertGreater(draw_transformer.band_height(), 0)
+
+    def test_draw_returns_nonempty_elements_for_each_output(self):
+        elements = draw_transformer.draw(
+            "XFMR1", hv_point=(100.0, 50.0), lv_kv=230, lv_outputs=[
+                Tap("Feed1", TapKind.FEEDER), Tap("Feed2", TapKind.LINE),
+            ], band_top=0.0,
+        )
+        # draw_transformer wraps its output in one <g> per call.
+        self.assertEqual(len(elements), 1)
+        self.assertIn("<g>", elements[0])
+        self.assertIn("XFMR1", elements[0])
+        self.assertIn("Feed1", elements[0])
+        self.assertIn("Feed2", elements[0])
+
+
+class TestOneLineDiagramRender(unittest.TestCase):
+    """Full-Station smoke tests: the diagram must be well-formed SVG
+    whether or not the station has a transformer -- this is what
+    regressed when a transformer's LV side stopped being a second real
+    strip (KeyError on tap_positions[xfmr.lv_tap]) before draw_transformer.py
+    /onelinediagram.py were reworked to draw it as a band instead.
+    """
+
+    def test_renders_well_formed_svg_with_no_transformers(self):
+        taps = [Tap("Feed1", TapKind.FEEDER)]
+        vl = single_bus.build("V13", 13.8, taps)
+        svg = onelinediagram.render(Station(name="NoXfmr", voltage_levels=[vl]))
+        root = etree.fromstring(svg.encode())
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+
+    def test_renders_well_formed_svg_with_a_transformer(self):
+        hv_taps = [Tap("Line1", TapKind.LINE), Tap("XfmrHV", TapKind.TRANSFORMER)]
+        hv_vl = breaker_and_half.build("V800", 800, hv_taps, start_index=1)
+        hv_tap = hv_vl.tap_node_for(hv_taps[1])
+        xfmr = transformer_lv.build_transformer(
+            "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
+        )
+        station = Station(name="WithXfmr", voltage_levels=[hv_vl], transformers=[xfmr])
+        svg = onelinediagram.render(station)
+        root = etree.fromstring(svg.encode())
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertIn("XFMR1", svg)
 
 
 if __name__ == "__main__":

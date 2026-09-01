@@ -2,7 +2,9 @@
 exception to the other three drawers' horizontal-rail convention: drawn
 as an actual circle, breakers at 12 o'clock going clockwise, taps at the
 midpoint between their two neighboring breakers, each with a stub
-radiating straight outward from the ring.
+radiating straight outward from the ring. Each stub carries a disconnect
+tick near the ring end (isolating the tap from the ring, same convention
+as the other drawers' bus-side disconnects).
 """
 
 import math
@@ -43,6 +45,9 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
 
         elements.append(svg_circle(inner_x, inner_y, 3, fill="#333"))
         elements.append(svg_line(inner_x, inner_y, outer_x, outer_y, stroke="#333", stroke_width=2))
+        disc_x = inner_x + (outer_x - inner_x) * 0.35
+        disc_y = inner_y + (outer_y - inner_y) * 0.35
+        elements.extend(tap_symbols.draw_disconnect_at(disc_x, disc_y, outer_x - inner_x, outer_y - inner_y))
 
         direction = 1 if math.sin(angle) >= 0 else -1
         elements.extend(tap_symbols.draw(outer_x, outer_y, direction, tap.kind))

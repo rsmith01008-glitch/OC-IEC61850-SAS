@@ -13,18 +13,22 @@ from .topology import Breaker, TapNode, Transformer, VoltageLevelBuild
 
 def remote_trips_for(transformer: Transformer) -> List[Breaker]:
     """Every breaker that must be tripped to fully isolate `transformer`
-    -- every breaker bounding its HV tap, plus every breaker bounding its
-    LV tap. Mechanically derived, decision #4: this is what "isolate the
-    transformer" means regardless of layout kind. Naturally reproduces
-    switchyard.scd's 4-breaker fan-out for 1.5-breaker (2 breakers bound
-    each tap), degrades to exactly 1 breaker per tap for single-bus/
-    main-and-transfer (only 1 breaker ever touches a tap there -- an
-    expected consequence of those layouts' construction, not a bug), and
-    gives 2 breakers per tap for ring bus (each tap's 2 ring neighbors).
+    -- every breaker bounding its HV tap. Mechanically derived, decision
+    #4: this is what "isolate the transformer" means regardless of
+    layout kind. Naturally reproduces scl/switchyard.scd's 2-breaker
+    fan-out for 1.5-breaker (both breakers bound the HV tap), degrades to
+    exactly 1 breaker for single-bus/main-and-transfer (only 1 breaker
+    ever touches a tap there -- an expected consequence of those
+    layouts' construction, not a bug), and gives 2 breakers for ring bus
+    (the tap's 2 ring neighbors).
+
+    The LV side is deliberately NOT considered: tripping the HV-side
+    breaker(s) fully de-energizes the transformer, which is sufficient,
+    and generator/layouts/transformer_lv.py's LV outputs are `DIS`
+    disconnects with no IED of their own to receive a remote trip in the
+    first place (see that module's header).
     """
-    hv_breakers = breakers_bounding(transformer.hv_tap, transformer.hv_vl.breakers)
-    lv_breakers = breakers_bounding(transformer.lv_tap, transformer.lv_vl.breakers)
-    return hv_breakers + lv_breakers
+    return breakers_bounding(transformer.hv_tap, transformer.hv_vl.breakers)
 
 
 def illustrative_interlocks(vl: VoltageLevelBuild) -> List[Tuple[Breaker, Breaker]]:
