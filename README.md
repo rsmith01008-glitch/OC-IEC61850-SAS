@@ -28,6 +28,8 @@ never multicast in actual IEC 61850 either.
 ## Architecture
 
 ```
+  scl/switchyard.scd  --[offline SCL compiler]-->  etc/generated/*.cfg  --[manual copy]-->  /etc/sas-*.cfg
+
    HMI (MineOS)  <--MMS-lite (TCP)-->  SCADA  <--MMS-lite (TCP)-->  IED A
                                          |                            |
                                          +====== GOOSE-lite ==========+==== IED B  ...
@@ -35,6 +37,13 @@ never multicast in actual IEC 61850 either.
                                            group; SCADA subscribes    ...
                                            only, IEDs pub+sub)
 ```
+
+Before any of the runtime pieces below start, there's a build-time stage:
+`scl/switchyard.scd` (an IEC 61850-6 SCL document -- the single source of
+truth for switchyard topology, communication, protection, and reporting
+config) is compiled offline into the `sas-ied-<name>.cfg`/`sas-scada.cfg`
+files the runtime actually reads. See "SCL / Substation Configuration
+Language" below.
 
 One shared GOOSE multicast group per station (`goose.group`, same address
 configured on the SCADA and on every IED): SCADA only subscribes; every
@@ -76,7 +85,121 @@ exactly once and return immediately rather than yielding
 callbacks are serviced by *any* coroutine's `pullSignal`, not just the one
 that registered them (`ipstack/daemon.lua`).
 
+## SCL / Substation Configuration Language
+
+Switchyard topology, GOOSE/report communication, and protection settings
+are authored once as real IEC 61850-6 SCL (`scl/switchyard.scd`), not
+hand-duplicated across `.cfg` files. An offline compiler
+(`tools/scl-compiler/`, Python 3 + `lxml` -- does **not** run on OC
+hardware) maps it onto this project's existing Lua-table-literal config
+format:
+
+```
+python3 tools/scl-compiler/scl_compile.py \
+  --scd scl/switchyard.scd --out-dir etc/generated/ --validate-xsd
+```
+
+The generated `etc/generated/sas-ied-<name>.cfg`/`sas-scada.cfg` files are
+checked into this repo as a golden reference (`--check` diffs freshly
+compiled output against them, for CI); a deployer copies the one matching
+each in-game OC computer to `/etc/sas-ied.cfg`/`/etc/sas-scada.cfg` --
+that last copy step stays manual since OC computers don't run Python.
+`etc/sas-ied.cfg.example`/`etc/sas-scada.cfg.example` remain separately
+hand-maintained as the lowest-barrier single-IED quickstart (unrelated to
+the compiler, not generated).
+
+Real SCL never encodes protection/interlock/synchrocheck algorithms --
+only LN instances and their settable parameters. Everything this codebase
+needs that has no standard SCL home (redstone/meter I/O bindings, SBO
+timeouts, interlock/remote-trip rules, protection scheme parameters,
+GOOSE transport addressing, report cadence, SCADA's historian/alarms)
+lives in `Private type="oc-iec61850-sas"` extensions
+(`xmlns:oc="urn:oc-iec61850-sas:v1"`) -- see `tools/scl-compiler/README.md`
+and `scl/README.md` for the exact element shapes and what the compiler
+does/doesn't consume. In particular: `GSE/Address` MAC-Address/APPID/
+VLAN-ID/VLAN-PRIORITY and `SampledValueControl`/`SMV` are carried as
+schema-real but purely **descriptive** metadata -- OC-IP-Stack has no
+802.1Q/priority-queue or process-bus-streaming transport underneath, so
+none of it is enforced (a possible future OC-IP-Stack enhancement, not
+part of this repo).
+
+`scl/switchyard.scd` is a minimal, hand-verifiable worked example: a
+1½-breaker 800kV/230kV switchyard (two 3-breaker diameters, one
+transformer, one line, one feeder -- see `scl/README.md` for the full
+topology and why it's trivially repeatable for a larger station).
+
+## Protection
+
+`sas/protection/{curves,ptoc,pdif,pdis}.lua`, evaluated every `iedd` tick
+(`sas/ied/engine.lua`'s `evaluateProtection`), configured via
+`sas-ied.cfg`'s `protection` section (see `etc/sas-ied.cfg.example`).
+Protection trips **bypass select-before-operate entirely** and call the
+physical output directly -- matching real substation practice (protection
+is direct-with-normal-security, never SBO; SBO exists to guard *human*
+commands, not time-critical automatic ones) -- and, by default, bypass
+`interlocks` too (`respectInterlocks = false`, overridable per scheme:
+"protection wins"). A trip **latches**: once tripped, a scheme stops
+re-evaluating and won't re-pulse the breaker until `iedd` restarts. Every
+protection scheme auto-registers a synthetic `<name>.Op` status point
+(always GOOSE-published), independent of any SCL `DataSet` -- this is how
+a **remote trip** command reaches a breaker the protection scheme doesn't
+own (see `remoteTrips` in `etc/sas-ied.cfg.example` -- structurally the
+inverse of `interlocks`: forces an operate instead of blocking one).
+
+- **PTOC** (time-overcurrent, `sas/protection/ptoc.lua`): real trip logic.
+  `sas/protection/curves.lua` implements the standard IEC 60255-151/IEEE
+  C37.112 inverse-time curve formulas plus `DEFINITE_TIME`; a
+  percentage-operate-time accumulator generalizes a curve's constant-
+  current trip time to fluctuating load (`accum += dt/timeToTrip(M,tms)`
+  while over pickup, decaying by `resetSec` otherwise). Magnitude-only,
+  same as every measurement in this codebase (Create:EE's `getValue()`
+  has no phase angle) -- a plain overcurrent scheme only ever needs
+  magnitude anyway, so this is a real, working relay.
+- **PDIF** (transformer differential, `sas/protection/pdif.lua`): real
+  trip logic, magnitude-restrained (no vector/phase-shift compensation).
+  Requires two local CT inputs (HV+LV) on the *same* IED -- there's no
+  low-latency cross-IED read path suitable for a differential trip's
+  timing, which is why a transformer needs its own dedicated protection
+  IED with local HV+LV meters (see `scl/README.md`'s `XFMR1`) rather than
+  living on a breaker IED.
+- **PDIS** (distance, `sas/protection/pdis.lua`): **not functional.**
+  Impedance is a V/I phasor ratio, and this hardware has no phase-angle
+  data source -- only scalar magnitude. Config-modeled for data-model
+  completeness (`zone1/2ReachOhms`/`DelaySec` settings carry through to
+  the compiled `.cfg`); the module logs "NOT FUNCTIONAL" once at `iedd`
+  startup and registers a dead `Op` point so SCADA/HMI show the tag
+  rather than a missing reference, instead of silently doing nothing.
+
+## Reporting
+
+`ReportControl`/`DataSet`/`TrgOps` (real SCL) map to a `reports` section
+in `sas-ied.cfg` -- a dataset + trigger-option-gated filter layered on top
+of (not replacing) the existing tick-driven poll loop. SCADA
+auto-subscribes to the first report an IED advertises; an IED with no
+`reports` configured (e.g. a hand-written `sas-ied.cfg` not yet SCL-ified)
+keeps today's unconditional "everything, every tick" behavior unchanged.
+`trgOps.dchg`/`qchg` gate on real change; `period` (needs a companion
+`periodSec`, since real SCL's `TrgOps/period` is a boolean with no
+interval) reports on a cadence regardless of change; `gi` sends one full
+dataset immediately on (re)subscribe; `bufTime` enforces a minimum
+re-report interval, IED-side. Deadband stays orthogonal (independent
+per-point suppression, unrelated to trigger options).
+
 ## Install (OpenOS: SCADA and IED nodes)
+
+Optional, once (on a real computer, not in-game -- see "SCL /
+Substation Configuration Language" above): compile `scl/switchyard.scd`
+(or your own) and copy the matching generated file over the hand-edited
+`.cfg` step below.
+
+```
+pip3 install -r tools/scl-compiler/requirements.txt
+python3 tools/scl-compiler/scl_compile.py \
+  --scd scl/switchyard.scd --out-dir etc/generated/ --validate-xsd
+# then copy etc/generated/sas-ied-<name>.cfg / sas-scada.cfg onto each
+# node as /etc/sas-ied.cfg / /etc/sas-scada.cfg, instead of the
+# cp .../*.cfg.example step below.
+```
 
 ```
 oppm install oc-ip-stack
@@ -193,6 +316,21 @@ same as before).
   validated by direct code review against OC-IP-Stack's actual source, not
   its README alone, but none of it has been run inside the actual mod --
   see Testing below.
+- **PDIS (distance protection) is not functional** -- config-modeled only.
+  See "Protection" above for why (no phase-angle data source).
+- **GOOSE VLAN/priority/MAC/APPID and Sampled Values are descriptive-only**
+  in the SCL/compiler and carry no enforcement -- OC-IP-Stack has no
+  802.1Q/priority-queue concept or process-bus streaming transport
+  underneath `ipstack.socket.multicast()`. See "SCL / Substation
+  Configuration Language" above.
+- **One `LDevice` per IED, compiler-enforced.** `tools/scl-compiler/`
+  refuses to compile an `IED` with more or fewer than exactly one
+  `LDevice` -- matches `sas/model.lua`'s hardcoded single-logical-device-
+  per-IED assumption, not a real 61850 constraint.
+- **Synchrocheck (`RSYN`) is not modeled at all**, not even inertly --
+  same hardware limitation as PDIS (no phase-angle data), and unlike
+  PDIS there's no settings-only value in carrying it through since a
+  synchrocheck's entire job is comparing phase across an open breaker.
 
 ## Testing
 
@@ -200,7 +338,14 @@ There is no way to execute `component`/`event`/OpenComputers or MineOS APIs
 outside the actual game (the same limitation OC-IP-Stack's own README
 documents). Every file was syntax-checked with `luac5.3 -p` (Lua 5.3,
 matching OpenComputers' Lua version); `.luacheckrc` declares the OC/OpenOS
-globals this codebase uses.
+globals this codebase uses. `sas/protection/{curves,ptoc,pdif}.lua` have
+zero OC-API coupling (no `component`/`event`) and are genuinely
+unit-tested via plain `lua5.3 tests/protection/test_*.lua` against
+published IEC/IEEE reference values, not just syntax-checked.
+`tools/scl-compiler/` (Python, runs outside the game entirely) has its
+own `python3 -m unittest discover -s tools/scl-compiler/tests` suite plus
+a golden-file round-trip check (`scl_compile.py --check`) -- see that
+tool's README.
 
 Manual/in-game (or [OCEmu](https://github.com/zenith391/OCEmu)) test
 runbook, in order:
@@ -244,16 +389,43 @@ runbook, in order:
    `gooseStaleAfterSec`, confirm A's operate is still blocked (default
    fail-safe), set `failOpen = true` on the rule, and confirm it is now
    allowed through (fail-open verified).
-6. **Alarms.** Configure an `sas-scada.cfg` alarm condition; confirm it
+6. **PTOC trip.** Configure a `protection.ptoc` scheme on an IED (see
+   `etc/sas-ied.cfg.example`); drive the bound ammeter above `pickup` and
+   hold it there. Confirm `<name>.Op` goes true once the accumulator
+   crosses 1.0 (roughly `curves.timeToTrip(curve, measured/pickup, tms)`
+   seconds after crossing pickup, not instantly), the breaker's control
+   point pulses **without** a `select` ever happening (protection bypasses
+   SBO), and a second overcurrent excursion after the trip does *not*
+   re-pulse it (latched until `iedd` restart). Drive the current back
+   under pickup before tripping and confirm the accumulator decays
+   (`resetSec`) instead of tripping.
+7. **PDIF trip + remote trip.** Three IED nodes: a transformer-protection
+   IED with local HV+LV CT meters and a `protection.pdif` scheme, plus two
+   breaker IEDs each carrying a `remoteTrips` rule watching that scheme's
+   `PDIF1.Op`. Drive the two CT readings apart past `minPickup`/
+   `restraintSlope` (e.g. hold LV near zero while HV carries load, an
+   "internal fault" pattern) and confirm `PDIF1.Op` goes true, both
+   breaker IEDs' control points pulse to `open` within one GOOSE
+   burst-retransmit interval, and a balanced/through-load current pair
+   does *not* trip it.
+8. **ReportControl.** Configure `reports` on an IED (see `rcbStatus1` in
+   `etc/sas-ied.cfg.example`); confirm SCADA's `subscribe` names the
+   `rcbName` (not `refs="*"`) and receives one full-dataset report
+   immediately (`gi`). Change a dataset point; confirm a report fires per
+   `trgOps.dchg`/`qchg`. Set `bufTime > 0` and confirm rapid successive
+   changes are coalesced to at most one report per `bufTime`. An IED with
+   no `reports` configured should keep receiving the old unconditional
+   `refs="*"` subscribe, unaffected.
+9. **Alarms.** Configure an `sas-scada.cfg` alarm condition; confirm it
    appears via `sas-ctl alarms`/`alarm-list`, ack it via `alarm-ack`,
    confirm it clears when the condition resolves, and confirm a
    not-yet-acked alarm that clears stays visible until acked.
-7. **Comm loss/recovery.** Stop `ipstackd` (or unplug the modem) on IED A.
+10. **Comm loss/recovery.** Stop `ipstackd` (or unplug the modem) on IED A.
    Confirm SCADA raises a `COMM_<iedName>` alarm (TCP loss) and, after
    `gooseStaleAfterSec`, a `GOOSE_<iedName>` alarm. Restart; confirm
    reconnect, `get-model` + `subscribe` re-run, and a full resync --
    without manually restarting `scadad`.
-8. **HMI.** Before GUI polish: confirm `require("ipstack.socket")` and a
+11. **HMI.** Before GUI polish: confirm `require("ipstack.socket")` and a
    `select`/`operate` round trip work from a minimal script under real
    MineOS (the risk noted above). Then exercise the mimic diagram,
    control dialog, alarm panel/ack, and history query end to end.
