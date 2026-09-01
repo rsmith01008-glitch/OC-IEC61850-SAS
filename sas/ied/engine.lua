@@ -35,6 +35,13 @@ local DEFAULTS = {
   gooseStaleAfterSec = 15,
   points = {},
   interlocks = {},
+  -- Named report control blocks (SCL ReportControl): dataset + trigger-
+  -- option-gated reporting, offered to clients by name via
+  -- subscribe{rcbName=...} instead of the raw subscribe{refs=...}/"*"
+  -- path (which stays exactly as-is for backward compatibility -- an
+  -- IED with no reports[] configured behaves identically to before this
+  -- existed). See handleSubscribe/deliverRcbReport below.
+  reports = {},
   -- Protection function logical nodes -- see sas/protection/*.lua.
   -- ptoc (overcurrent) and pdif (differential) have real trip logic;
   -- pdis (distance) is modeled for completeness only, never trips (see
@@ -128,7 +135,7 @@ local function handleGetModel(client, msg)
   model.eachPoint(engine.state.db, function(_, rec)
     table.insert(points, { ln = rec.ln, doName = rec.doName, type = rec.type })
   end)
-  sendMsg(client, messages.replyTo(msg, { ld = engine.state.db.ld, points = points }))
+  sendMsg(client, messages.replyTo(msg, { ld = engine.state.db.ld, points = points, reports = engine.state.cfg.reports }))
 end
 
 local function handleRead(client, msg)
@@ -142,7 +149,57 @@ local function handleRead(client, msg)
   sendMsg(client, messages.replyTo(msg, { values = values }))
 end
 
+local function findReportControl(name)
+  for _, rcb in ipairs(engine.state.cfg.reports) do
+    if rcb.name == name then return rcb end
+  end
+  return nil
+end
+
+-- Sends the current value of every point in `rcb.dataset` as one report,
+-- unconditionally -- used for TrgOps.gi (general interrogation) right
+-- after a client subscribes to a report control block, mirroring real
+-- 61850's "GI gives you the full picture on subscribe" behavior.
+local function sendFullDataset(client, rcb, now)
+  local values = {}
+  for _, ref in ipairs(rcb.dataset) do
+    local rec = engine.state.db.points[ref]
+    if rec then
+      values[ref] = { value = rec.value, quality = rec.quality, t = rec.lastChangeAt }
+    end
+  end
+  if next(values) then
+    sendMsg(client, { type = "report", values = values })
+    client.rcb.lastSentAt = now
+  end
+end
+
+-- subscribe{rcbName=...} (dataset + TrgOps-gated, IED-side rate-limited)
+-- and subscribe{refs=...|"*"} (unconditional "any change", the original
+-- behavior) are mutually exclusive per client connection -- whichever
+-- was subscribed most recently wins, matching handleSubscribe's existing
+-- overwrite-on-resubscribe semantics.
 local function handleSubscribe(client, msg)
+  if msg.rcbName then
+    local rcb = findReportControl(msg.rcbName)
+    if not rcb then
+      sendMsg(client, messages.replyTo(msg, { ok = false, err = "unknown report control block: " .. tostring(msg.rcbName) }))
+      return
+    end
+    local datasetSet = {}
+    for _, ref in ipairs(rcb.dataset) do datasetSet[ref] = true end
+
+    client.subs = nil
+    client.rcb = { cfg = rcb, datasetSet = datasetSet, pending = {}, lastSentAt = 0, lastPeriodicAt = 0 }
+
+    sendMsg(client, messages.replyTo(msg, { ok = true }))
+    if rcb.trgOps and rcb.trgOps.gi then
+      sendFullDataset(client, rcb, computer.uptime())
+    end
+    return
+  end
+
+  client.rcb = nil
   if msg.refs == "*" then
     client.subs = "*"
   else
@@ -150,7 +207,7 @@ local function handleSubscribe(client, msg)
     for _, ref in ipairs(msg.refs or {}) do subs[ref] = true end
     client.subs = subs
   end
-  sendMsg(client, messages.replyTo(msg, {}))
+  sendMsg(client, messages.replyTo(msg, { ok = true }))
 end
 
 local function handleSelect(client, msg)
@@ -368,9 +425,15 @@ end
 -- Polls every status/measured-value point's I/O binding, updates its live
 -- value, and returns the list of refs that changed (or that are due for
 -- a periodic integrity refresh even without a real change, so subscribed
--- reports/GOOSE never go silently stale on a genuinely static plant).
+-- reports/GOOSE never go silently stale on a genuinely static plant),
+-- plus a ref->"dchg"|"qchg" map (a point only ever gets one tag per
+-- tick, since the two branches below are mutually exclusive) used by
+-- deliverRcbReport to apply TrgOps filtering -- a forced integrity
+-- refresh is tagged "dchg" (the common/default TrgOps case) rather than
+-- inventing a third category for it.
 local function pollPoints(now)
   local changedRefs = {}
+  local changeKind = {}
   local forceIntegrity = (not engine.state.lastIntegrityAt)
     or (now - engine.state.lastIntegrityAt >= (engine.state.cfg.integritySec or 30))
 
@@ -382,22 +445,69 @@ local function pollPoints(now)
         model.setValue(rec, val, "good", now)
         if changed or forceIntegrity then
           table.insert(changedRefs, ref)
+          changeKind[ref] = "dchg"
         end
       elseif rec.quality ~= "invalid" then
         rec.quality = "invalid"
         table.insert(changedRefs, ref)
+        changeKind[ref] = "qchg"
       end
     end
   end)
 
   if forceIntegrity then engine.state.lastIntegrityAt = now end
-  return changedRefs
+  return changedRefs, changeKind
 end
 
-local function deliverReports(changedRefs)
-  if #changedRefs == 0 then return end
+-- Applies one report-control-block client's TrgOps/bufTime semantics.
+-- dchg/qchg: in-dataset refs from this tick's changedRefs, gated on the
+-- matching TrgOps flag (dupd, if enabled, accepts either kind -- real
+-- SCL dupd means "report even with no real change", which this
+-- simplified model approximates as "don't filter by kind" rather than
+-- adding a third fully-distinct signal for it). period: forces the
+-- WHOLE dataset in on a fixed cadence regardless of change. bufTime:
+-- IED-side minimum spacing between sends for this client -- eligible
+-- values accumulate in `rcb.pending` and flush together once bufTime
+-- has elapsed since the last send, rather than being dropped.
+local function deliverRcbReport(client, changedRefs, changeKind, now)
+  local rcb = client.rcb
+  local cfg = rcb.cfg
+  local trgOps = cfg.trgOps or {}
+
+  for _, ref in ipairs(changedRefs) do
+    if rcb.datasetSet[ref] then
+      local kind = changeKind[ref]
+      local include = trgOps.dupd or (kind == "dchg" and trgOps.dchg) or (kind == "qchg" and trgOps.qchg)
+      if include then
+        local rec = engine.state.db.points[ref]
+        rcb.pending[ref] = { value = rec.value, quality = rec.quality, t = rec.lastChangeAt }
+      end
+    end
+  end
+
+  if trgOps.period and cfg.periodSec and cfg.periodSec > 0
+      and (now - rcb.lastPeriodicAt) >= cfg.periodSec then
+    rcb.lastPeriodicAt = now
+    for _, ref in ipairs(cfg.dataset) do
+      local rec = engine.state.db.points[ref]
+      if rec then
+        rcb.pending[ref] = { value = rec.value, quality = rec.quality, t = rec.lastChangeAt }
+      end
+    end
+  end
+
+  if next(rcb.pending) and (now - rcb.lastSentAt) >= (cfg.bufTime or 0) then
+    sendMsg(client, { type = "report", values = rcb.pending })
+    rcb.pending = {}
+    rcb.lastSentAt = now
+  end
+end
+
+local function deliverReports(changedRefs, changeKind, now)
   for _, client in ipairs(engine.state.clients) do
-    if client.subs then
+    if client.rcb then
+      deliverRcbReport(client, changedRefs, changeKind, now)
+    elseif client.subs and #changedRefs > 0 then
       local values = {}
       for _, ref in ipairs(changedRefs) do
         if client.subs == "*" or client.subs[ref] then
@@ -571,11 +681,14 @@ function engine.tick()
 
     receiveGoosePeers(now)
 
-    local changedRefs = pollPoints(now)
-    for _, ref in ipairs(evaluateProtection(now)) do table.insert(changedRefs, ref) end
+    local changedRefs, changeKind = pollPoints(now)
+    for _, ref in ipairs(evaluateProtection(now)) do
+      table.insert(changedRefs, ref)
+      changeKind[ref] = "dchg"
+    end
     remoteTripCheck(now)
 
-    deliverReports(changedRefs)
+    deliverReports(changedRefs, changeKind, now)
     publishGoose(changedRefs, now)
 
     engine.state.sbo:tick(now)
@@ -639,6 +752,44 @@ local function validateRemoteTrips(db, remoteTrips)
     end
     if rule.peerValue == nil then
       return nil, "remoteTrips[" .. i .. "]: missing peerValue"
+    end
+  end
+  return true
+end
+
+-- Hard-validates every reports[] report control block: unique name,
+-- dataset refs all resolve, trgOps fields (if present) are booleans,
+-- periodSec required and positive when trgOps.period is set, bufTime/
+-- confRev are non-negative numbers if present. Returns true, or nil, err.
+local function validateReports(db, reports)
+  local seenNames = {}
+  for i, rcb in ipairs(reports) do
+    if type(rcb.name) ~= "string" or rcb.name == "" then
+      return nil, "reports[" .. i .. "]: missing name"
+    end
+    if seenNames[rcb.name] then
+      return nil, "reports[" .. i .. "]: duplicate name " .. rcb.name
+    end
+    seenNames[rcb.name] = true
+    if type(rcb.dataset) ~= "table" or #rcb.dataset == 0 then
+      return nil, "reports[" .. rcb.name .. "]: dataset must be a non-empty list of point refs"
+    end
+    for _, ref in ipairs(rcb.dataset) do
+      if not db.points[ref] then
+        return nil, "reports[" .. rcb.name .. "]: dataset references unknown point " .. tostring(ref)
+      end
+    end
+    local trgOps = rcb.trgOps or {}
+    for _, flag in ipairs({ "dchg", "qchg", "dupd", "period", "gi" }) do
+      if trgOps[flag] ~= nil and type(trgOps[flag]) ~= "boolean" then
+        return nil, "reports[" .. rcb.name .. "]: trgOps." .. flag .. " must be a boolean"
+      end
+    end
+    if trgOps.period and (type(rcb.periodSec) ~= "number" or rcb.periodSec <= 0) then
+      return nil, "reports[" .. rcb.name .. "]: trgOps.period requires a positive periodSec"
+    end
+    if rcb.bufTime ~= nil and (type(rcb.bufTime) ~= "number" or rcb.bufTime < 0) then
+      return nil, "reports[" .. rcb.name .. "]: bufTime must be a non-negative number"
     end
   end
   return true
@@ -723,6 +874,11 @@ function engine.start()
   if not pOk then
     engine.log("error", "ied: invalid protection configuration: %s", tostring(pErr))
     return nil, pErr
+  end
+  local repOk, repErr = validateReports(engine.state.db, cfg.reports)
+  if not repOk then
+    engine.log("error", "ied: invalid reports configuration: %s", tostring(repErr))
+    return nil, repErr
   end
 
   -- Fails loudly (no retry loop) if ipstackd isn't running -- matches

@@ -7,7 +7,7 @@
 -- Request -> reply:
 --   get-model              -> get-model-reply   {id, ld, points={{ln,doName,type},...}}
 --   read      {refs}       -> read-reply        {id, values={[ref]={value,quality,t}}}
---   subscribe {refs|"*"}   -> subscribe-ok       {id}
+--   subscribe {refs|"*"|rcbName} -> subscribe-reply {id, ok, err}
 --   select    {ref}        -> select-reply       {id, ok, token, err}
 --   operate   {ref,token,value} -> operate-reply {id, ok, err}
 --   cancel    {ref,token}  -> cancel-reply       {id, ok, err}

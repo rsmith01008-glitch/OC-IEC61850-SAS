@@ -153,6 +153,30 @@
     },
   },
 
+  -- Named report control blocks (SCL ReportControl): dataset +
+  -- trigger-option-gated reporting, offered to clients by name via
+  -- subscribe{rcbName=...}. SCADA auto-subscribes to the first report an
+  -- IED advertises (see sas/scada/engine.lua's pollIedClient); an IED
+  -- with no reports[] configured falls back to today's unconditional
+  -- "everything, every tick" subscribe{refs="*"} behavior, so this is
+  -- entirely optional/additive.
+  reports = {
+    {
+      name = "rcbStatus1",
+      dataset = { "XCBR1.Pos", "MMXU1.Vol", "MMXU1.Amp", "PTOC1.Op" },
+      trgOps = {
+        dchg = true,   -- report when a dataset point's value changes
+        qchg = true,   -- report when a dataset point's quality changes
+        dupd = false,  -- report even with no real change (approximated here as "don't filter by kind")
+        period = false, -- also report periodically regardless of change (needs periodSec below)
+        gi = true,      -- send the full dataset once, immediately after subscribe
+      },
+      -- periodSec = 10,  -- only used when trgOps.period = true
+      bufTime = 0,        -- minimum seconds between reports to this client (0 = send immediately)
+      confRev = 1,        -- bumped by convention whenever this rcb's dataset/trgOps change
+    },
+  },
+
   -- Protection function logical nodes (see sas/protection/*.lua).
   -- Evaluated every tick; a trip LATCHES (stops re-evaluating and won't
   -- re-pulse the breaker) until iedd restarts.

@@ -162,7 +162,21 @@ local function pollIedClient(iedEntry, now)
       local aggEntry = model.ensureIedEntry(engine.state.db, iedEntry.cfg.name)
       aggEntry.connOk = true
       iedEntry.modelId = nil
-      iedEntry.subId = client:sendRequest({ type = "subscribe", refs = "*" })
+      -- Prefer the IED's own ReportControl-derived report (dataset +
+      -- trigger-option-gated, IED-side rate-limited via bufTime) if it
+      -- advertises one, matching SCL's actual reporting model instead of
+      -- an unconditional "everything, every tick" subscribe. Falls back
+      -- to refs="*" for an IED with no reports[] configured (hand-
+      -- written cfg, not yet SCL-ified) -- fully backward compatible.
+      -- Only the first advertised report is used; an IED offering
+      -- several named reports is a real 61850 capability this keeps
+      -- deliberately unexploited for now (SCADA subscribes to one
+      -- primary report per IED connection).
+      if reply.reports and reply.reports[1] then
+        iedEntry.subId = client:sendRequest({ type = "subscribe", rcbName = reply.reports[1].name })
+      else
+        iedEntry.subId = client:sendRequest({ type = "subscribe", refs = "*" })
+      end
       engine.log("info", "scada: %s model learned (%d point(s))", iedEntry.cfg.name, #reply.points)
     end
   else
