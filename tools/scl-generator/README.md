@@ -1,0 +1,213 @@
+# SCL generator
+
+An interactive Python wizard that turns answers about substation layout
+into an IEC 61850-6 SCL `.scd` file, plus a one-line diagram (SVG) --
+so a new switchyard never requires hand-writing SCL's dense XML naming
+conventions and non-obvious schema-ordering rules by hand. This is the
+companion to `tools/scl-compiler/` (which *compiles* a `.scd` into this
+project's `sas-ied.cfg`/`sas-scada.cfg` format): the generator *produces*
+a `.scd`, the compiler *consumes* one. Offline, build-time only, never
+runs on OC hardware -- same as the compiler.
+
+`scl/switchyard.scd` (the existing worked example) stays hand-authored;
+use this tool for a *new* station, or as a starting point you then
+hand-edit -- the generated `.scd` is a normal SCL file, not a
+compiler-owned artifact you must regenerate on every change.
+
+## Install
+
+```
+pip3 install -r tools/scl-generator/requirements.txt
+```
+
+(Only dependency: `lxml`, reused from `tools/scl-compiler/` for
+`--validate-xsd` and pretty-printing.)
+
+## Run
+
+```
+python3 tools/scl-generator/scl_generate.py [--out-dir scl/]
+```
+
+Pure interactive `input()` session -- no CLI flags or answers file in
+this version. Every prompt with a default shown in `[brackets]` accepts
+a blank line to take it, so a minimal single-diameter station is a short
+session. Writes `<substation>.scd` and `<substation>-oneline.svg` into
+`--out-dir` (default `scl/`), XSD-validates the `.scd` against the
+vendored schema, and offers to compile it immediately via the real
+`tools/scl-compiler/scl_compile.py`.
+
+## Example session (abridged)
+
+Reproducing something close to `scl/switchyard.scd`'s own topology --
+two 1½-breaker voltage levels joined by one transformer:
+
+```
+=== OC-IEC61850-SAS SCL generator ===
+Substation name: Switchyard1
+
+--- Voltage level 1 ---
+Voltage level name [V1]: V800
+Nominal kV: 800
+Layout kind for this voltage level?
+  *1) 1½-breaker
+   2) Single/main bus
+   3) Main-and-transfer bus
+   4) Ring bus
+Choice [1]:
+  Tap 1 name (blank to finish this voltage level): Line1
+  Tap kind? Choice [1]:                  # 1 = line
+  Tap 2 name (blank to finish this voltage level): XfmrHV
+  Tap kind? Choice [1]: 3                # 3 = transformer
+  Tap 3 name (blank to finish this voltage level):
+Add another voltage level? [y/N]: y
+
+--- Voltage level 2 ---
+Voltage level name [V2]: V230
+Nominal kV: 230
+Layout kind for this voltage level?
+Choice [1]:
+  Tap 1 name: XfmrLV
+  Tap kind? Choice [1]: 3
+  Tap 2 name: Feed1
+  Tap kind? Choice [1]: 2                # 2 = feeder
+  Tap 3 name:
+Add another voltage level? [y/N]:
+
+--- Transformers ---
+2 unclaimed transformer tap(s) need pairing into transformers.
+Transformer name [XFMR1]:
+  Pick the HV-side tap:
+  *1) V800 / XfmrHV (800 kV)
+Choice [1]:
+  Pick the LV-side tap:
+  *1) V230 / XfmrLV (230 kV)
+Choice [1]:
+  XFMR1: HV scale 1.000, LV scale 3.478
+
+--- Protection defaults (applied to every breaker/transformer) ---
+PTOC pickup (amps) [1.2]:
+PTOC curve? Choice [1]:                  # IEC_VERY_INVERSE
+...
+
+--- Summary ---
+Substation: Switchyard1
+  V800: 800 kV, breaker_and_half, 2 tap(s), 3 breaker(s)
+  V230: 230 kV, breaker_and_half, 2 tap(s), 3 breaker(s)
+Transformers: 1
+  XFMR1: V800 (800kV) <-> V230 (230kV)
+Total breaker IEDs: 6
+SCADA IED: SCADA1
+
+Generate now? [Y/n]:
+wrote scl/switchyard1.scd
+wrote scl/switchyard1-oneline.svg
+XSD validation: OK
+
+Compile now via tools/scl-compiler? [Y/n]:
+Compile output directory [etc/generated]:
+wrote etc/generated/sas-ied-cb1.cfg
+...
+```
+
+## What the wizard asks, in order
+
+1. Substation name.
+2. **Per voltage level** (repeat until done): name, kV, layout kind (see
+   below), then a **tap loop** (name + line/feeder/transformer kind,
+   repeat until blank) -- validated and built immediately on finishing
+   that voltage level's taps, so a bad tap count (see Scoping decisions)
+   is caught and re-asked right away, not at the very end.
+3. **Transformers** (skipped if no transformer-kind taps exist): pair up
+   each unclaimed transformer tap with one on a different, lower-kV
+   voltage level. The differential-protection turns-ratio `scale` is
+   always computed automatically (`HV_kV / LV_kV`) -- never asked.
+4. Protection defaults (PTOC pickup/curve/time-multiplier-or-definite-
+   time/reset, PDIF min-pickup/restraint-slope) -- asked **once** for
+   the whole station, not per breaker/transformer.
+5. GOOSE/network defaults (multicast group/port, MMS addressing, MAC/
+   APPID/VLAN, GOOSE timing).
+6. IED settings defaults (tick interval, integrity, GOOSE stale-after,
+   ports).
+7. SCADA settings (IED name, historian, auto-generated alarms).
+8. A summary, then final confirmation before anything is written.
+
+## Auto-derived, not asked
+
+- **Remote trips**: every transformer's differential protection
+  (`PDIF1.Op`) automatically trips every breaker bounding either of its
+  two taps -- mechanically derived from the topology graph, not a
+  judgment call (`generator/derive.py`'s `remote_trips_for`).
+- **Illustrative interlocks**: one mutual interlock pair per diameter/
+  ring junction (matching `scl/switchyard.scd`'s one-per-diameter
+  pattern) -- a placeholder proving the cross-IED mechanism works, *not*
+  a real site-specific interlock philosophy. Single-bus and
+  main-and-transfer layouts never produce any (see below).
+
+## Scoping decisions
+
+- **Four supported layout kinds**: 1½-breaker, single/main bus,
+  main-and-transfer bus, ring bus. The original request also mentioned
+  "low rise" and "in-line," which aren't standard electrical-topology
+  names and weren't clarified further when asked -- this is a documented
+  scoping decision, not a silent drop. Real "low/high profile"
+  substation design is a civil/structural-height choice, not something
+  SCL's `Substation`/`Bay`/`ConductingEquipment` model represents, so
+  there's no separate topology to add for it here.
+- **1½-breaker requires an even tap count** (3 breakers : 2 bays per
+  diameter) -- an odd count is a hard error, not silently padded or
+  dropped.
+- **Ring bus requires at least 3 taps** to close a sensible loop.
+- **Main-and-transfer does not model the per-bay transfer-bus bypass
+  disconnect** that gives this layout its real maintenance-switching
+  capability in an actual substation -- only the transfer bus rail and
+  one tie breaker are represented, for topological/diagram fidelity to
+  the layout's *name*. Consequence: a transformer landing on a
+  main-and-transfer bay is bounded by only its one main breaker (not a
+  bug -- see `generator/layouts/main_and_transfer.py`'s header).
+- **Illustrative interlocks never appear on single-bus or
+  main-and-transfer** layouts, at any tap count -- every tap in those
+  two layouts has exactly one bounding breaker by construction, and only
+  a tap with *exactly two* bounding breakers ever qualifies (see
+  `generator/derive.py`'s `illustrative_interlocks` docstring for the
+  exact rule and why it generalizes cleanly across all four layouts with
+  no per-layout branching).
+- **The diagram is schematic, not IEC 60617-symbol-library-exact** --
+  not to scale, coordinates chosen for legibility, not standards
+  compliance.
+- **No CLI-flag/answers-file scripting mode in this version** -- pure
+  interactive `input()` only.
+
+## Output files
+
+- `<substation>.scd` -- the generated SCL document. A normal file you
+  may hand-edit afterward; re-running the wizard always starts fresh, it
+  never merges into an existing `.scd`.
+- `<substation>-oneline.svg` -- the one-line diagram, viewable in any
+  browser.
+
+Both existing-file overwrite prompts, the XSD validation step, and the
+optional immediate compile all reuse `tools/scl-compiler/` directly
+(`scl.validate.validate_xsd`, `scl_compile.compile_scd`) rather than
+reimplementing any of it.
+
+## Testing
+
+```
+python3 -m unittest discover -s tools/scl-generator/tests -v
+```
+
+Plain `unittest`, matching `tools/scl-compiler/tests`' own convention
+(no pytest in this environment). The topology/layout/derivation math
+(`generator/topology.py`, `generator/layouts/*.py`, `generator/derive.py`)
+and the diagram's coordinate math (`generator/diagram/layout_geometry.py`)
+are pure Python with no XML or `input()` dependency, so they're
+genuinely unit-tested with exact terminal-identity/breaker-count
+assertions, not just smoke-checked. `tests/test_scl_writer.py` is the
+strongest correctness signal: it builds `Station` objects directly (no
+`input()`), then runs the generated SCL through the **real**
+`tools/scl-compiler/scl/validate.py`'s `validate_xsd()` and the **real**
+`tools/scl-compiler/scl_compile.py`'s `compile_scd()` -- proving
+generated output isn't just schema-valid but actually compiles cleanly
+through the existing pipeline, directly parallel to how
+`scl/switchyard.scd` itself was verified.

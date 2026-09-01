@@ -108,6 +108,15 @@ that last copy step stays manual since OC computers don't run Python.
 hand-maintained as the lowest-barrier single-IED quickstart (unrelated to
 the compiler, not generated).
 
+Hand-writing a `.scd` from scratch means getting SCL's dense XML naming
+conventions and non-obvious schema-ordering rules exactly right --
+`tools/scl-generator/` is the recommended way to *produce* one instead:
+an interactive wizard (`python3 tools/scl-generator/scl_generate.py`)
+walks through substation layout (1½-breaker/single-bus/main-and-transfer/
+ring-bus), bay/tap/voltage configuration, and protection/network
+defaults, then writes a `.scd` plus a one-line diagram SVG -- see that
+tool's own README for the full workflow and its scoping decisions.
+
 Real SCL never encodes protection/interlock/synchrocheck algorithms --
 only LN instances and their settable parameters. Everything this codebase
 needs that has no standard SCL home (redstone/meter I/O bindings, SBO
