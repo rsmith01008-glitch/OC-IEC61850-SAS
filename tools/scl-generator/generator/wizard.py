@@ -8,7 +8,7 @@ session transcript.
 
 from . import prompts, naming
 from .topology import (
-    Tap, TapKind, LayoutKind, Station,
+    Tap, TapKind, LayoutKind, Station, EQUIP_CBR, EQUIP_DIS,
     ProtectionDefaults, NetworkDefaults, IedSettingsDefaults, ScadaDefaults,
 )
 from .layouts import LAYOUT_BUILDERS, transformer_lv
@@ -243,19 +243,29 @@ def _collect_scada_defaults(has_transformers: bool) -> ScadaDefaults:
     )
 
 
+def _n_cbr(vl) -> int:
+    return sum(1 for b in vl.breakers if b.equip_type == EQUIP_CBR)
+
+
+def _n_dis(vl) -> int:
+    return sum(1 for b in vl.breakers if b.equip_type == EQUIP_DIS)
+
+
 def _print_summary(station: Station):
-    n_breakers = sum(len(vl.breakers) for vl in station.voltage_levels)
+    n_breakers = sum(_n_cbr(vl) for vl in station.voltage_levels)
+    n_disconnects = sum(_n_dis(vl) for vl in station.voltage_levels)
     print("\n--- Summary ---")
     print("Substation: %s" % station.name)
     for vl in station.voltage_levels:
-        print("  %s: %g kV, %s, %d tap(s), %d breaker(s)"
-              % (vl.vl_name, vl.kv, vl.layout_kind.value, len(vl.taps), len(vl.breakers)))
+        print("  %s: %g kV, %s, %d tap(s), %d breaker(s), %d disconnect(s)"
+              % (vl.vl_name, vl.kv, vl.layout_kind.value, len(vl.taps), _n_cbr(vl), _n_dis(vl)))
     print("Transformers: %d" % len(station.transformers))
     for xfmr in station.transformers:
         n_outputs = len(xfmr.lv_vl.taps)
         print("  %s: HV tap in %s (%gkV) -> LV %gkV, %d simple output(s)"
               % (xfmr.name, xfmr.hv_vl.vl_name, xfmr.hv_vl.kv, xfmr.lv_vl.kv, n_outputs))
     print("Total breaker IEDs: %d" % n_breakers)
+    print("Total isolating disconnects (descriptive only, no IED): %d" % n_disconnects)
     print("SCADA IED: %s" % station.scada.ied_name)
 
     for vl in station.voltage_levels:

@@ -2,10 +2,15 @@
 between two adjacent breakers. No separate bus node -- the taps
 themselves are the ring junctions. Needs at least 3 taps to close a
 sensible loop.
+
+Every breaker also gets a real isolating `DIS` on each side, and every
+line/feeder tap gets one more `DIS` on its outward side (see
+generator/layouts/common.py).
 """
 
-from ..topology import TapNode, Breaker, BayGroup, VoltageLevelBuild, LayoutKind
+from ..topology import TapNode, Breaker, BayGroup, VoltageLevelBuild, LayoutKind, TapKind
 from ..naming import validate_identifier
+from .common import add_isolating_disconnects, add_exit_disconnect
 
 
 def build(vl_name: str, kv: float, taps: list, start_index: int = 1) -> VoltageLevelBuild:
@@ -36,11 +41,16 @@ def build(vl_name: str, kv: float, taps: list, start_index: int = 1) -> VoltageL
     # direction) -- every breaker ends up owned by exactly one bay, same
     # convention as breaker_and_half.py's diameter bays.
     for i, tap in enumerate(taps):
-        vl.bays.append(BayGroup(
+        bay = BayGroup(
             "Bay%d" % (i + 1),
             desc="%s tap (%s)" % (tap.kind.value.capitalize(), tap.name),
             breakers=[breakers[i]],
             connectivity_nodes=[nodes[i]],
-        ))
+        )
+        vl.bays.append(bay)
+
+        add_isolating_disconnects(vl, bay, breakers[i])
+        if tap.kind in (TapKind.LINE, TapKind.FEEDER):
+            add_exit_disconnect(vl, bay, nodes[i])
 
     return vl

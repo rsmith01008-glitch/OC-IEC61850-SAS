@@ -1,8 +1,15 @@
 """One-line diagram drawer for the single/main-bus layout: one bus rail,
 one breaker + stub per tap hanging below it.
+
+The breaker is flanked by 2 disconnect ticks (bus side and tap side),
+matching the real `DIS` devices generator/layouts/single_bus.py's
+`add_isolating_disconnects` adds around it; a line/feeder tap gets one
+more disconnect on its own exit stub (`tap_symbols.draw_tap_with_exit`,
+matching that same builder's `add_exit_disconnect`).
 """
 
 from ..topology import VoltageLevelBuild
+from ..layouts.common import breakers_bounding
 from . import layout_geometry as geo
 from . import tap_symbols
 from .svg_primitives import svg_line, svg_rect, svg_circle, svg_text
@@ -26,16 +33,17 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
         node = vl.tap_node_for(tap)
         mid_y = (rail_y + tap_y) / 2
 
+        gap = geo.BREAKER_SIZE / 2 + tap_symbols.DISCONNECT_GAP
         elements.append(svg_circle(x, rail_y, 3, fill="#333"))
         elements.append(svg_line(x, rail_y, x, tap_y, stroke="#333", stroke_width=2))
-        elements.extend(tap_symbols.draw_disconnect(x, rail_y + (mid_y - rail_y) / 2, vertical=True))
+        elements.extend(tap_symbols.draw_disconnect(x, mid_y - gap, vertical=True))
+        elements.extend(tap_symbols.draw_disconnect(x, mid_y + gap, vertical=True))
         elements.append(svg_rect(x - geo.BREAKER_SIZE / 2, mid_y - geo.BREAKER_SIZE / 2,
                                   geo.BREAKER_SIZE, geo.BREAKER_SIZE, fill="white", stroke="#333", stroke_width=2))
 
-        breaker = next(b for b in vl.breakers if node in (b.node_a, b.node_b))
+        breaker = breakers_bounding(node, vl.breakers)[0]
         elements.append(svg_text(x + 12, mid_y + 4, breaker.name, font_size=11))
-        elements.extend(tap_symbols.draw(x, tap_y, 1, tap.kind))
-        elements.append(svg_text(x, tap_y + 30, tap.name, text_anchor="middle", font_size=11))
+        elements.extend(tap_symbols.draw_tap_with_exit(x, tap_y, 1, tap))
 
         tap_positions[node] = (x, tap_y)
 

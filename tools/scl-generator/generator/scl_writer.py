@@ -29,7 +29,7 @@ from scl.parse import SCL_NS, OC_NS, OC_PRIVATE_TYPE, q, oc_q  # noqa: E402
 
 from .topology import (  # noqa: E402
     Station, VoltageLevelBuild, Transformer, Node, BusNode, TapNode,
-    Breaker, BayGroup,
+    Breaker, BayGroup, EQUIP_CBR,
 )
 from .derive import remote_trips_for, illustrative_interlocks  # noqa: E402
 from . import naming  # noqa: E402
@@ -466,9 +466,9 @@ def _build_scada_ied(root, station: Station):
 
     if scada.auto_undervoltage_alarms:
         for vl in station.voltage_levels:
-            if not vl.breakers:
+            ref_breaker = next((b for b in vl.breakers if b.equip_type == EQUIP_CBR), None)
+            if ref_breaker is None:
                 continue
-            ref_breaker = vl.breakers[0]
             threshold = vl.kv * 1000 * scada.undervoltage_ratio
             _oc_el(priv, "alarm", {
                 "id": "%s_VOLTAGE_LOW" % vl.vl_name,

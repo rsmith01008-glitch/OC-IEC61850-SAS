@@ -33,6 +33,21 @@ output -- not spanning a second switchyard. See
 two-switchyard-joined-by-transformer shape -- it's hand-authored and out
 of this tool's scope, so it hasn't been updated to match.)
 
+**Isolating disconnects are real modeled devices, not diagram
+decoration:** every breaker in every switchyard (including a
+main-and-transfer layout's tie breaker) gets a real
+`ConductingEquipment type="DIS"` on each of its 2 sides, and every
+line/feeder tap gets one more `DIS` on its own outward side before it
+actually leaves the station -- 3 breakers x 2 + up to 2 tap exits = up
+to 8 disconnects per breaker-and-half diameter, matching the reference
+one-line's "Disc. switch -> Circuit breaker -> Line" pattern exactly.
+Like the transformer LV stub's own outputs, these disconnects get no
+IED, no `ConnectedAP`, no GOOSE -- descriptive topology only, matching
+real "manual/local, not remotely monitored" disconnect practice. See
+`generator/layouts/common.py`'s `add_isolating_disconnects`/
+`add_exit_disconnect` for how every layout builder gets this uniformly,
+with no per-layout special-casing.
+
 ## Install
 
 ```
@@ -98,10 +113,11 @@ PTOC curve? Choice [1]:                  # IEC_VERY_INVERSE
 
 --- Summary ---
 Substation: Switchyard1
-  V800: 800 kV, breaker_and_half, 4 tap(s), 6 breaker(s)
+  V800: 800 kV, breaker_and_half, 4 tap(s), 6 breaker(s), 15 disconnect(s)
 Transformers: 1
   XFMR1: HV tap in V800 (800kV) -> LV 230kV, 1 simple output(s)
 Total breaker IEDs: 6
+Total isolating disconnects (descriptive only, no IED): 15
 SCADA IED: SCADA1
 
 Generate now? [Y/n]:
@@ -146,11 +162,15 @@ wrote etc/generated/sas-ied-cb1.cfg
 - **Remote trips**: every transformer's differential protection
   (`PDIF1.Op`) automatically trips every breaker bounding its HV tap --
   mechanically derived from the topology graph, not a judgment call
-  (`generator/derive.py`'s `remote_trips_for`). The LV side is
-  deliberately never considered: tripping the HV-side breaker(s) fully
-  de-energizes the transformer, and the LV outputs are plain `DIS`
-  disconnects with no IED of their own to receive a remote trip in the
-  first place.
+  (`generator/derive.py`'s `remote_trips_for`). "Bounding" walks straight
+  through any isolating disconnects to find the real breaker on each
+  side (`generator/layouts/common.py`'s `breakers_bounding`) -- a manual
+  disconnect never changes which breaker actually has to open to clear a
+  fault, so its presence never changes remote-trip/interlock derivation.
+  The LV side is deliberately never considered: tripping the HV-side
+  breaker(s) fully de-energizes the transformer, and the LV outputs are
+  plain `DIS` disconnects with no IED of their own to receive a remote
+  trip in the first place.
 - **Illustrative interlocks**: one mutual interlock pair per diameter/
   ring junction (matching `scl/switchyard.scd`'s one-per-diameter
   pattern) -- a placeholder proving the cross-IED mechanism works, *not*
@@ -177,9 +197,14 @@ wrote etc/generated/sas-ied-cb1.cfg
   disconnect** that gives this layout its real maintenance-switching
   capability in an actual substation -- only the transfer bus rail and
   one tie breaker are represented, for topological/diagram fidelity to
-  the layout's *name*. Consequence: a transformer landing on a
-  main-and-transfer bay is bounded by only its one main breaker (not a
-  bug -- see `generator/layouts/main_and_transfer.py`'s header).
+  the layout's *name*. This is a different, specific disconnect from the
+  generic isolating ones every breaker gets (see above) -- it's the
+  extra bypass path around each tap breaker that lets a tap stay in
+  service while its own breaker is pulled for maintenance, and it's the
+  one piece of switching this layout is scoped out of. Consequence: a
+  transformer landing on a main-and-transfer bay is bounded by only its
+  one main breaker (not a bug -- see
+  `generator/layouts/main_and_transfer.py`'s header).
 - **Illustrative interlocks never appear on single-bus or
   main-and-transfer** layouts, at any tap count -- every tap in those
   two layouts has exactly one bounding breaker by construction, and only

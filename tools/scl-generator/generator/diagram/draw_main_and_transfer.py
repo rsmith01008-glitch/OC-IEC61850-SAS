@@ -1,9 +1,15 @@
 """One-line diagram drawer for the main-and-transfer bus layout: a solid
 main bus rail (taps hang off it, same as single_bus) plus a dashed
 transfer bus rail joined to it by one tie breaker at the rightmost slot.
+
+Every breaker (including the tie) is flanked by 2 disconnect ticks,
+matching the real `DIS` devices generator/layouts/main_and_transfer.py's
+`add_isolating_disconnects` adds around it; a line/feeder tap gets one
+more disconnect on its own exit stub (`tap_symbols.draw_tap_with_exit`).
 """
 
-from ..topology import VoltageLevelBuild
+from ..topology import VoltageLevelBuild, EQUIP_CBR
+from ..layouts.common import breakers_bounding
 from . import layout_geometry as geo
 from . import tap_symbols
 from .svg_primitives import svg_line, svg_rect, svg_circle, svg_text
@@ -14,7 +20,11 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
     tap_positions = {}
 
     main_y = strip_top + 50
-    transfer_y = strip_top + 90
+    # Wide enough for the tie breaker's own 2 flanking disconnects
+    # (each geo.BREAKER_SIZE/2 + tap_symbols.DISCONNECT_GAP from its
+    # center) to fit between main_y and transfer_y without spilling
+    # past either rail.
+    transfer_y = strip_top + 50 + 2 * (geo.BREAKER_SIZE / 2 + tap_symbols.DISCONNECT_GAP) + 20
     tap_y = strip_top + geo.STRIP_HEIGHT - 50
     n_taps = len(vl.taps)
     tie_x = geo.tap_x(n_taps)
@@ -34,29 +44,30 @@ def draw(vl: VoltageLevelBuild, strip_top: float):
         node = vl.tap_node_for(tap)
         mid_y = (main_y + tap_y) / 2
 
+        gap = geo.BREAKER_SIZE / 2 + tap_symbols.DISCONNECT_GAP
         elements.append(svg_circle(x, main_y, 3, fill="#333"))
         elements.append(svg_line(x, main_y, x, tap_y, stroke="#333", stroke_width=2))
-        elements.extend(tap_symbols.draw_disconnect(x, main_y + (mid_y - main_y) / 2, vertical=True))
+        elements.extend(tap_symbols.draw_disconnect(x, mid_y - gap, vertical=True))
+        elements.extend(tap_symbols.draw_disconnect(x, mid_y + gap, vertical=True))
         elements.append(svg_rect(x - geo.BREAKER_SIZE / 2, mid_y - geo.BREAKER_SIZE / 2,
                                   geo.BREAKER_SIZE, geo.BREAKER_SIZE, fill="white", stroke="#333", stroke_width=2))
 
-        breaker = next(b for b in vl.breakers if node in (b.node_a, b.node_b) and b.name != _tie_name(vl))
+        breaker = breakers_bounding(node, vl.breakers)[0]
         elements.append(svg_text(x + 12, mid_y + 4, breaker.name, font_size=11))
-        elements.extend(tap_symbols.draw(x, tap_y, 1, tap.kind))
-        elements.append(svg_text(x, tap_y + 30, tap.name, text_anchor="middle", font_size=11))
+        elements.extend(tap_symbols.draw_tap_with_exit(x, tap_y, 1, tap))
 
         tap_positions[node] = (x, tap_y)
 
-    tie = vl.breakers[-1]
+    tie_bay = next(b for b in vl.bays if b.name == "Tie")
+    tie = next(b for b in tie_bay.breakers if b.equip_type == EQUIP_CBR)
     tie_mid_y = (main_y + transfer_y) / 2
+    tie_gap = geo.BREAKER_SIZE / 2 + tap_symbols.DISCONNECT_GAP
     elements.append(svg_line(tie_x, main_y, tie_x, transfer_y, stroke="#333", stroke_width=2))
+    elements.extend(tap_symbols.draw_disconnect(tie_x, tie_mid_y - tie_gap, vertical=True))
+    elements.extend(tap_symbols.draw_disconnect(tie_x, tie_mid_y + tie_gap, vertical=True))
     elements.append(svg_rect(tie_x - geo.BREAKER_SIZE / 2, tie_mid_y - geo.BREAKER_SIZE / 2,
                               geo.BREAKER_SIZE, geo.BREAKER_SIZE, fill="white", stroke="#333", stroke_width=2))
     elements.append(svg_text(tie_x + 12, tie_mid_y + 4, tie.name, font_size=11))
     elements.append(svg_text(tie_x, transfer_y - 10, "Tie", text_anchor="middle", font_size=10, fill="#888"))
 
     return elements, tap_positions
-
-
-def _tie_name(vl: VoltageLevelBuild) -> str:
-    return vl.breakers[-1].name

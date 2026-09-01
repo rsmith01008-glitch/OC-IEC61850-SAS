@@ -128,10 +128,13 @@ class TestCompilesThroughRealPipeline(unittest.TestCase):
             scd_path.write_bytes(scl_writer.to_string(scl_writer.write(_transformer_station())))
             outputs = compile_scd(str(scd_path), validate_schema=True)
             # 3 breakers (one diameter) + 1 transformer + 1 scada -- the
-            # transformer's LV output is a DIS with no IED of its own.
-            self.assertEqual(len(outputs), 5)
-            self.assertIn("sas-ied-xfmr1.cfg", outputs)
-            self.assertIn("sas-scada.cfg", outputs)
+            # diameter's own isolating DIS (CB1DA/CB1DB/... -- see
+            # generator/layouts/common.py) and the transformer's LV
+            # output DIS get no IED of their own, same as every DIS.
+            self.assertEqual(set(outputs.keys()), {
+                "sas-ied-cb1.cfg", "sas-ied-cb2.cfg", "sas-ied-cb3.cfg",
+                "sas-ied-xfmr1.cfg", "sas-scada.cfg",
+            })
 
     def test_transformer_station_remote_trips_present_in_compiled_output(self):
         with tempfile.TemporaryDirectory() as tmp:

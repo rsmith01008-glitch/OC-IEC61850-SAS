@@ -6,12 +6,20 @@ minimal illustration and scl/switchyard.scd for the pattern this
 generalizes. Taps must come in an even count; an odd count is a hard
 error rather than silently padding or dropping a tap, since either would
 fabricate topology the user didn't ask for.
+
+Every breaker also gets a real isolating `DIS` on each side (6 per
+diameter), and every line/feeder tap gets one more `DIS` on its outward
+side (see generator/layouts/common.py's `add_isolating_disconnects`/
+`add_exit_disconnect`) -- 8 total for an all-line/feeder diameter,
+matching real breaker-and-a-half practice and the reference one-line
+this tool was corrected against.
 """
 
 from typing import List
 
-from ..topology import BusNode, TapNode, Breaker, BayGroup, VoltageLevelBuild, LayoutKind
+from ..topology import BusNode, TapNode, Breaker, BayGroup, VoltageLevelBuild, LayoutKind, TapKind
 from ..naming import validate_identifier
+from .common import add_isolating_disconnects, add_exit_disconnect
 
 
 def build(vl_name: str, kv: float, taps: list, start_index: int = 1) -> VoltageLevelBuild:
@@ -56,6 +64,13 @@ def build(vl_name: str, kv: float, taps: list, start_index: int = 1) -> VoltageL
             connectivity_nodes=[node0, node1],
         )
         vl.bays.append(diameter)
+
+        for cb in (cb_a, cb_mid, cb_b):
+            add_isolating_disconnects(vl, diameter, cb)
+        for tap, node in ((tap0, node0), (tap1, node1)):
+            if tap.kind in (TapKind.LINE, TapKind.FEEDER):
+                add_exit_disconnect(vl, diameter, node)
+
         breaker_index += 3
 
     return vl

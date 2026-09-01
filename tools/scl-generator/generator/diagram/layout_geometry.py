@@ -6,8 +6,8 @@ rendering code (see tests/test_diagram_geometry.py).
 
 import math
 
-STRIP_HEIGHT = 240
-STRIP_GAP = 40
+STRIP_HEIGHT = 340
+STRIP_GAP = 50
 LEFT_MARGIN = 160
 TAP_PITCH = 140
 BREAKER_SIZE = 16

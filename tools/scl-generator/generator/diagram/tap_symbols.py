@@ -8,21 +8,35 @@ Feeder tap = hollow triangle (visually distinct load-side termination).
 Transformer tap = no arrow at all -- draw_transformer.py's elbow
 connector attaches directly to the bare point instead.
 
-`draw_disconnect` is the separate isolator/disconnect-switch symbol
-(a short diagonal tick across the conductor, the open-position
-convention this tool's reference one-line uses) -- drawn adjacent to
-breakers in every strip drawer and at every transformer LV output, never
-merged with the breaker symbol itself (a disconnect and a circuit
-breaker are two distinct devices in series, same as the reference).
+`draw_disconnect`/`draw_disconnect_at` are the separate isolator/
+disconnect-switch symbol (a short diagonal tick across the conductor,
+the open-position convention this tool's reference one-line uses) --
+drawn adjacent to breakers in every strip drawer and at every
+transformer LV output, never merged with the breaker symbol itself (a
+disconnect and a circuit breaker are two distinct devices in series,
+same as the reference). `draw_tap_with_exit` is the shared "line/feeder
+tap gets its own exit disconnect on a short stub, transformer tap
+connects straight in" pattern used by every vertical-stub drawer
+(single_bus/main_and_transfer/breaker_and_half) -- see its own
+docstring and generator/layouts/common.py's `add_exit_disconnect`.
 """
 
 import math
 
 from ..topology import TapKind
-from .svg_primitives import svg_polygon, svg_circle, svg_line
+from .svg_primitives import svg_polygon, svg_circle, svg_line, svg_text
 
 _SIZE = 10
 _DISCONNECT_SIZE = 7
+_EXIT_STUB_LEN = 10
+_LABEL_GAP = 26
+
+#: Distance from a breaker's own center to each of its 2 flanking
+#: disconnects -- shared by every strip drawer so a breaker's pair of
+#: isolating disconnects always sits close to it regardless of the
+#: surrounding span length (see draw_breaker_and_half.py for why a
+#: fraction-of-the-whole-span placement doesn't generalize safely).
+DISCONNECT_GAP = 18
 
 
 def draw_disconnect(x: float, y: float, vertical: bool) -> list:
@@ -66,3 +80,30 @@ def draw(x: float, y: float, direction_dy: float, kind: TapKind) -> list:
     if kind == TapKind.FEEDER:
         return [svg_polygon([tip, left, right], fill="none", stroke="#333", stroke_width=1.5)]
     return [svg_circle(x, y, 3, fill="#333")]
+
+
+def draw_tap_with_exit(x: float, y: float, direction_dy: float, tap) -> list:
+    """Draws a tap's symbol + label out from its junction point (x, y)
+    in the `direction_dy` direction (+1/-1). A transformer tap connects
+    straight into the yard at (x, y) -- no exit switch of its own (its
+    HV side ties directly into the switchyard; see
+    generator/layouts/transformer_lv.py). A line/feeder tap instead gets
+    a short visible stub out to its symbol, with its own isolating
+    disconnect -- a real `DIS`, see generator/layouts/common.py's
+    `add_exit_disconnect` -- at the stub's midpoint, matching the
+    reference one-line's switch before the line/feeder actually leaves.
+    """
+    elements = []
+    if tap.kind == TapKind.TRANSFORMER:
+        elements.extend(draw(x, y, direction_dy, tap.kind))
+        elements.append(svg_text(x, y + direction_dy * _LABEL_GAP, tap.name,
+                                  text_anchor="middle", font_size=11))
+        return elements
+
+    tap_y = y + direction_dy * _EXIT_STUB_LEN
+    elements.append(svg_line(x, y, x, tap_y, stroke="#333", stroke_width=2))
+    elements.extend(draw_disconnect(x, y + direction_dy * _EXIT_STUB_LEN / 2, vertical=True))
+    elements.extend(draw(x, tap_y, direction_dy, tap.kind))
+    elements.append(svg_text(x, tap_y + direction_dy * _LABEL_GAP, tap.name,
+                              text_anchor="middle", font_size=11))
+    return elements

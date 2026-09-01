@@ -251,14 +251,20 @@ class Station:
     scada: ScadaDefaults = field(default_factory=ScadaDefaults)
 
     def all_breakers(self):
-        """Every breaker across every voltage level, in station order
-        (VL entry order, breaker order within each VL) -- the order
-        breaker IEDs are named/numbered in, matching switchyard.scd's
-        CB1..CB3 (V800) then CB4..CB6 (V230) convention.
+        """Every real (`EQUIP_CBR`) breaker across every voltage level,
+        in station order (VL entry order, breaker order within each VL)
+        -- the order breaker IEDs are named/numbered in, matching
+        switchyard.scd's CB1..CB3 (V800) then CB4..CB6 (V230) convention.
+        Isolating `EQUIP_DIS` disconnects (every breaker's own pair, plus
+        each line/feeder tap's exit switch -- see
+        generator/layouts/common.py) are deliberately excluded: they get
+        no IED, no ConnectedAP, no GOOSE of their own, same as the
+        transformer LV stub's own DIS outputs.
         """
         for vl in self.voltage_levels:
             for breaker in vl.breakers:
-                yield breaker
+                if breaker.equip_type == EQUIP_CBR:
+                    yield breaker
 
     def find_vl(self, vl_name: str) -> VoltageLevelBuild:
         for vl in self.voltage_levels:
