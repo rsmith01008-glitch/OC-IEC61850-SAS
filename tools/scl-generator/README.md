@@ -214,7 +214,14 @@ wrote etc/generated/sas-ied-cb1.cfg
   no per-layout branching).
 - **The diagram is schematic, not IEC 60617-symbol-library-exact** --
   not to scale, coordinates chosen for legibility, not standards
-  compliance. Every transformer's symbol and LV output fan is drawn in
+  compliance. A 1½-breaker diameter is drawn as ONE vertical string
+  between the two buses (Bus1 -- CB_a -- tap0 -- CB_mid -- tap1 -- CB_b
+  -- Bus2, each tap branching sideways between its two neighboring
+  breakers), matching the reference one-line's single-string diameter --
+  not two separate columns joined by a horizontal jumper, which visually
+  read as if each tap attached to CB_mid instead of to its own bus-side
+  breaker (see `generator/diagram/draw_breaker_and_half.py`'s header).
+  Every transformer's symbol and LV output fan is drawn in
   one shared horizontal band below the bottom of all real switchyard
   strips (never as a second strip of its own) -- if a transformer's HV
   tap lives in a strip above another real strip, its connector is simply

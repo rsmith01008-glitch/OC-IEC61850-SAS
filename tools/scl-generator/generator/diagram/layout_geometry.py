@@ -13,6 +13,23 @@ TAP_PITCH = 140
 BREAKER_SIZE = 16
 TITLE_HEIGHT = 60
 
+#: breaker_and_half draws one vertical string per diameter (not one
+#: column per tap) -- DIAMETER_PITCH is the horizontal spacing between
+#: diameters, wide enough for a tap's own sideways branch (BRANCH_LEN)
+#: on either side without reaching the next diameter's string.
+DIAMETER_PITCH = 220
+BRANCH_LEN = 90
+
+
+def diameter_x(index: int) -> float:
+    """Left-to-right x-coordinate for the index-th diameter's own
+    vertical string (0-based)."""
+    return LEFT_MARGIN + index * DIAMETER_PITCH
+
+
+def diameter_strip_width(n_diameters: int) -> float:
+    return diameter_x(max(n_diameters - 1, 0)) + DIAMETER_PITCH
+
 
 def strip_y0(rank: int) -> float:
     """Top y-coordinate of the rank-th voltage-level strip (0 = topmost,

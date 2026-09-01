@@ -37,6 +37,10 @@ def render(station: Station) -> str:
 
         if vl.layout_kind == LayoutKind.RING_BUS:
             width = 2 * (geo.ring_radius(len(vl.taps)) + 70) + geo.LEFT_MARGIN
+        elif vl.layout_kind == LayoutKind.BREAKER_AND_HALF:
+            # One vertical string per diameter (not per tap) -- see
+            # draw_breaker_and_half.py.
+            width = geo.diameter_strip_width(len(vl.taps) // 2) + geo.LEFT_MARGIN
         else:
             n_slots = len(vl.taps) + (1 if vl.layout_kind == LayoutKind.MAIN_AND_TRANSFER else 0)
             width = geo.strip_width(n_slots) + geo.LEFT_MARGIN

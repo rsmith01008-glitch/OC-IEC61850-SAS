@@ -82,6 +82,50 @@ def draw(x: float, y: float, direction_dy: float, kind: TapKind) -> list:
     return [svg_circle(x, y, 3, fill="#333")]
 
 
+def draw_horizontal(x: float, y: float, direction_dx: float, kind: TapKind) -> list:
+    """Same symbol as `draw`, rotated 90 degrees: `direction_dx` is +1
+    (points rightward/outward) or -1 (points leftward/outward) -- for a
+    tap branching sideways off a vertical string (breaker_and_half's
+    single-diameter column; see `draw_tap_with_exit_horizontal`).
+    """
+    tip = (x + direction_dx * _SIZE * 1.6, y)
+    top = (x, y - _SIZE * 0.7)
+    bot = (x, y + _SIZE * 0.7)
+
+    if kind == TapKind.LINE:
+        return [svg_polygon([tip, top, bot], fill="#333")]
+    if kind == TapKind.FEEDER:
+        return [svg_polygon([tip, top, bot], fill="none", stroke="#333", stroke_width=1.5)]
+    return [svg_circle(x, y, 3, fill="#333")]
+
+
+def draw_tap_with_exit_horizontal(x: float, y: float, direction_dx: float, tap) -> list:
+    """Horizontal counterpart of `draw_tap_with_exit`, for a tap
+    branching sideways off a vertical diameter string (see
+    draw_breaker_and_half.py) instead of continuing straight out from a
+    horizontal bus rail. Same rule: a transformer tap connects straight
+    in with no exit switch; a line/feeder tap gets its own isolating
+    disconnect on a short horizontal stub.
+    """
+    elements = []
+    label_anchor = "start" if direction_dx > 0 else "end"
+    label_dx = 8 if direction_dx > 0 else -8
+
+    if tap.kind == TapKind.TRANSFORMER:
+        elements.extend(draw_horizontal(x, y, direction_dx, tap.kind))
+        elements.append(svg_text(x + direction_dx * _LABEL_GAP, y + 4, tap.name,
+                                  text_anchor=label_anchor, font_size=11))
+        return elements
+
+    tap_x = x + direction_dx * _EXIT_STUB_LEN
+    elements.append(svg_line(x, y, tap_x, y, stroke="#333", stroke_width=2))
+    elements.extend(draw_disconnect(x + direction_dx * _EXIT_STUB_LEN / 2, y, vertical=False))
+    elements.extend(draw_horizontal(tap_x, y, direction_dx, tap.kind))
+    elements.append(svg_text(tap_x + direction_dx * _LABEL_GAP, y + 4, tap.name,
+                              text_anchor=label_anchor, font_size=11))
+    return elements
+
+
 def draw_tap_with_exit(x: float, y: float, direction_dy: float, tap) -> list:
     """Draws a tap's symbol + label out from its junction point (x, y)
     in the `direction_dy` direction (+1/-1). A transformer tap connects

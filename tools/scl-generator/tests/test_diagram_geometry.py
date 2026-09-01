@@ -39,6 +39,21 @@ class TestTapX(unittest.TestCase):
         self.assertGreater(geo.strip_width(0), 0)
 
 
+class TestDiameterX(unittest.TestCase):
+    def test_diameter_x_increasing(self):
+        self.assertLess(geo.diameter_x(0), geo.diameter_x(1))
+        self.assertAlmostEqual(geo.diameter_x(1) - geo.diameter_x(0), geo.DIAMETER_PITCH)
+
+    def test_diameter_strip_width_grows_with_diameter_count(self):
+        self.assertLess(geo.diameter_strip_width(1), geo.diameter_strip_width(2))
+        self.assertGreater(geo.diameter_strip_width(0), 0)
+
+    def test_branch_len_fits_within_diameter_pitch(self):
+        # A tap's sideways branch must never reach the next diameter's
+        # own vertical string (see draw_breaker_and_half.py).
+        self.assertLess(geo.BRANCH_LEN, geo.DIAMETER_PITCH)
+
+
 class TestRingGeometry(unittest.TestCase):
     def test_ring_radius_grows_with_tap_count(self):
         self.assertLess(geo.ring_radius(3), geo.ring_radius(6))
@@ -134,6 +149,23 @@ class TestOneLineDiagramRender(unittest.TestCase):
         root = etree.fromstring(svg.encode())
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
         self.assertIn("XFMR1", svg)
+
+    def test_renders_well_formed_svg_with_multiple_diameters(self):
+        # Each diameter is its own vertical string (see
+        # draw_breaker_and_half.py) -- this locks in that the strip
+        # width scales with diameter count, not tap count, and that a
+        # second diameter's own tap positions don't collide with the
+        # first's.
+        taps = [
+            Tap("Line1", TapKind.LINE), Tap("Line2", TapKind.LINE),
+            Tap("Line3", TapKind.LINE), Tap("Line4", TapKind.LINE),
+        ]
+        vl = breaker_and_half.build("V800", 800, taps)
+        svg = onelinediagram.render(Station(name="MultiDiameter", voltage_levels=[vl]))
+        root = etree.fromstring(svg.encode())
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        width = float(root.get("width"))
+        self.assertGreaterEqual(width, geo.diameter_strip_width(2) + geo.LEFT_MARGIN)
 
 
 if __name__ == "__main__":
