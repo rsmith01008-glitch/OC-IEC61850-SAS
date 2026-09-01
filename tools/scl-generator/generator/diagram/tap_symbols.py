@@ -109,12 +109,13 @@ def draw_tap_with_exit_horizontal(x: float, y: float, direction_dx: float, tap) 
     """
     elements = []
     label_anchor = "start" if direction_dx > 0 else "end"
-    label_dx = 8 if direction_dx > 0 else -8
 
     if tap.kind == TapKind.TRANSFORMER:
+        # Labeled above the junction, not beside it -- draw_transformer.py
+        # jogs sideways starting from this exact point, so a same-side
+        # label would sit right on top of that jog line.
         elements.extend(draw_horizontal(x, y, direction_dx, tap.kind))
-        elements.append(svg_text(x + direction_dx * _LABEL_GAP, y + 4, tap.name,
-                                  text_anchor=label_anchor, font_size=11))
+        elements.append(svg_text(x, y - 10, tap.name, text_anchor="middle", font_size=11))
         return elements
 
     tap_x = x + direction_dx * _EXIT_STUB_LEN
