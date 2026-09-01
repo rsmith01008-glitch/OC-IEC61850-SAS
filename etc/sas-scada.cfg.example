@@ -1,0 +1,58 @@
+-- OC-IEC61850-SAS SCADA configuration.
+--
+-- Copy this file to /etc/sas-scada.cfg and edit it. Plain Lua table
+-- literal (serialization.unserialize) -- see sas-ied.cfg.example's header
+-- for the same syntax notes. Restart after editing: rc scadad restart
+--
+-- Requires ipstackd (OC-IP-Stack) already configured and running on this
+-- machine.
+{
+  -- MMS-lite TCP server port for HMI clients.
+  hms = { port = 8103 },
+
+  -- GOOSE subscriber -- must join the same multicast group as every
+  -- IED's goose.group, and bind the same port as every IED's goose.port.
+  goose = { port = 8104, group = "255.10" },
+
+  tickIntervalSec = 0.2,
+
+  -- Defense-in-depth full "read" refresh per IED, on top of (not instead
+  -- of) each IED's own periodic integrity broadcast.
+  resyncSec = 60,
+
+  connectTimeoutSec = 5,
+  reconnectIntervalSec = 10,
+
+  -- How long a publishing IED can go without a GOOSE datagram before its
+  -- GOOSE-sourced points are marked stale and a comm alarm is raised.
+  gooseStaleAfterSec = 15,
+
+  -- Every IED this SCADA connects to. SCADA does NOT need each IED's
+  -- point list here -- it learns that automatically via get-model on
+  -- connect. `name` must exactly match that IED's own `iedName`.
+  ieds = {
+    { name = "IED-BRK1", ip = "1.10", port = 8102 },
+    -- { name = "IED-BRK2", ip = "1.11", port = 8102 },
+  },
+
+  historian = {
+    dir = "/var/log/sas-scada",
+    maxBytes = 262144,
+    maxFiles = 5,
+  },
+
+  -- User-defined alarm conditions, evaluated every tick against the live
+  -- aggregate database. `ref` is a fully qualified point reference
+  -- ("<iedName>/<ldName>/<LN>.<DOName>"); `condition` is one of
+  -- "eq"|"ne"|"lt"|"gt".
+  alarms = {
+    {
+      id = "V1_LOW", ref = "IED-BRK1/LD0/MMXU1.Vol", condition = "lt", value = 200,
+      severity = "medium", message = "Bus 1 undervoltage",
+    },
+    {
+      id = "BRK1_OPEN", ref = "IED-BRK1/LD0/XCBR1.Pos", condition = "eq", value = "open",
+      severity = "high", message = "Breaker 1 open",
+    },
+  },
+}

@@ -1,0 +1,77 @@
+# `scl/switchyard.scd`
+
+The single source of truth for this project's switchyard: an IEC 61850-6
+(SCL2007B4) document describing a minimal 1½-breaker 800kV/230kV
+switchyard -- two 3-breaker diameters, one power transformer, one
+incoming line, one outgoing feeder -- plus every IED's communication,
+protection, and reporting configuration. `tools/scl-compiler/` compiles
+it into the `.cfg` files this project's runtime actually reads (checked
+in as golden reference at `etc/generated/`); see that tool's own README
+for the compiler's invocation and how it maps SCL onto our config.
+
+## Topology
+
+```
+800kV: BusA800 --CB1-- N1(Line1 tap) --CB2-- N2(XFMR1 HV tap) --CB3-- BusB800   [Diameter1]
+230kV: BusA230 --CB4-- N3(XFMR1 LV tap) --CB5-- N4(Feed1 tap)  --CB6-- BusB230  [Diameter2]
+PowerTransformer XFMR1: TransformerWinding HV (Terminal @ N2), LV (Terminal @ N3)
+```
+
+This is the textbook-minimal 1½-breaker illustration: each diameter has
+exactly 2 taps / 3 breakers (the "1.5" ratio is 3 breakers : 2 bays), and
+the pattern is trivially repeated for a larger station -- add another
+`<Bay>` with 3 more `<ConductingEquipment type="CBR">` and 2 more
+`<ConnectivityNode>`s for each additional line/feeder/transformer
+diameter, plus a matching breaker IED per new `CBRn`.
+
+Isolating the transformer fully requires opening **both** breakers
+bounding each of its taps -- CB2 and CB3 on the HV side (both touch N2),
+CB4 and CB5 on the LV side (both touch N3) -- not just one per side. This
+is why `XFMR1`'s differential trip (`PDIF1.Op`) reaches all four via
+`remoteTrips[]` on those four breaker IEDs, not two.
+
+## IEDs
+
+- `CB1`..`CB6`: one per breaker. Own `XCBR1.Pos`/`PosCtl` (redstone),
+  local `MMXU1.Amp`/`Vol` (Create:EE meters), a real-trip `PTOC1`
+  overcurrent scheme, a GOOSE-published `XCBR1.Pos`, and an `rcbStatus1`
+  report. `CB2`/`CB3`/`CB4`/`CB5` additionally carry a `remoteTrip[]`
+  reacting to `XFMR1`'s `PDIF1.Op`. `CB1`/`CB2` and `CB4`/`CB5` each carry
+  one illustrative `interlock[]` (not a complete substation interlock
+  philosophy -- just proof the cross-IED mechanism works).
+- `XFMR1`: dedicated transformer-protection IED. No breaker of its own --
+  its job needs simultaneous HV+LV CT readings (`MMXU1.Amp`/`MMXU2.Amp`),
+  which only makes sense co-located on one IED (this codebase's "one IED
+  owns its own equipment" pattern, extended here to "protection reads only
+  its own IED's meters"). Runs a real-trip `PDIF1` (magnitude-restrained
+  differential) and an inert `PDIS1` (distance -- config-modeled only, see
+  `sas/protection/pdis.lua`'s header for why: no phase-angle data source).
+  Also carries a bare `RDRE1` (disturbance recorder) LN -- SCL data-model
+  completeness only, not wired to any event-capture code.
+- `SCADA1` (`IED type="SCADA"`): the SCADA concentrator, itself modeled as
+  an `IED` per this project's `Private` conventions (see
+  `tools/scl-compiler/scl/mapping.py`'s `map_scada`). `ieds[]` is derived
+  automatically from every other IED sharing its `SubNetwork`.
+
+## What's real vs. descriptive-only here
+
+- **Real / compiled / enforced**: topology-derived point types (CDC
+  resolution), GOOSE dataset membership (`goose=true` per point),
+  interlocks, remote trips, PTOC/PDIF trip logic, ReportControl/TrgOps
+  filtering.
+- **Descriptive-only** (present in the SCL for schema-completeness and
+  human documentation, not consumed by the compiler or enforced by any
+  runtime code): `GSE/Address` MAC-Address/APPID/VLAN-ID/VLAN-PRIORITY
+  (OC-IP-Stack has no 802.1Q/priority-queue concept underneath --
+  see the OC-IP-Stack transport enhancement writeup for what a real
+  implementation would need), the `SampledValueControl`/`SMV` on `XFMR1`
+  (no process-bus streaming transport exists), `GSEControl@securityEnable`
+  (always `"None"` -- no GOOSE authentication/encryption is implemented),
+  and `RDRE1` (no oscillography capture exists).
+- **Out of scope, not modeled at all**: synchrocheck (`RSYN`) -- same
+  hardware limitation as `PDIS1` (Create:EE's `getValue()` gives magnitude
+  only, no phase angle, and a synchrocheck fundamentally needs to compare
+  phase across an open breaker); IEC 61850's "Sim"/test-mode flag and MMS
+  file-transfer services -- both are runtime protocol behaviors in real
+  61850, not SCL configuration items, and neither exists in this
+  project's MMS-lite protocol.

@@ -1,0 +1,244 @@
+-- OC-IEC61850-SAS IED configuration.
+--
+-- Copy this file to /etc/sas-ied.cfg and edit it. This is a plain Lua
+-- table literal read with serialization.unserialize, so it must stay
+-- valid Lua syntax -- comments are fine, but every value needs a trailing
+-- comma or correct table syntax. Any key you omit falls back to the
+-- built-in defaults in sas/ied/engine.lua. Restart after editing:
+-- rc iedd restart
+--
+-- Requires ipstackd (OC-IP-Stack) already configured and running on this
+-- machine -- see /etc/ipstack.cfg.example. iedd will refuse to start if
+-- ipstackd is not running.
+{
+  -- Must match this IED's `name` entry in every SCADA that talks to it
+  -- (sas-scada.cfg's `ieds` list) -- used both to build fully-qualified
+  -- point references and to stamp published GOOSE datagrams.
+  iedName = "IED-BRK1",
+
+  -- IEC 61850-style logical device name for this IED.
+  logicalDevice = "LD0",
+
+  -- MMS-lite TCP server port (get-model/read/subscribe/select/operate/...).
+  mms = { port = 8102 },
+
+  goose = {
+    port = 8104,
+    -- Shared multicast group this IED joins to publish AND subscribe
+    -- GOOSE -- a "subnet.host" address in OC-IP-Stack's reserved
+    -- multicast subnet (255, ip.MULTICAST_SUBNET). Must exactly match
+    -- every other IED's goose.group and the SCADA's goose.group in
+    -- sas-scada.cfg -- there is one shared group for the whole station
+    -- bus, not one per pair of peers. No per-peer address list needed
+    -- (unlike a plain unicast/UDP fallback) -- every IED that joins this
+    -- group hears every other IED's publications automatically.
+    group = "255.10",
+    -- Fast retransmit burst (seconds after each real dataset change)...
+    burstIntervalsSec = { 0.2, 0.5, 1, 2 },
+    -- ...then settle to this steady heartbeat for liveness.
+    heartbeatSec = 5,
+  },
+
+  -- How often the engine tick runs: I/O polling, connection servicing,
+  -- SBO/pulse housekeeping.
+  tickIntervalSec = 0.2,
+
+  -- Even with no real change, every point is re-reported/re-published at
+  -- least this often, so a subscriber can never silently go stale on a
+  -- genuinely static plant.
+  integritySec = 30,
+
+  -- How long a PEER IED's GOOSE can go without a fresh datagram before
+  -- that peer's points (used by `interlocks` below) are treated as
+  -- stale. Same concept as sas-scada.cfg's gooseStaleAfterSec, evaluated
+  -- locally here instead, since interlocking is IED-to-IED and never
+  -- brokered through SCADA.
+  gooseStaleAfterSec = 15,
+
+  points = {
+    -- Breaker position status (double point: open/closed/intermediate/bad),
+    -- read from two redstone inputs (e.g. limit switches).
+    {
+      ln = "XCBR1", doName = "Pos", type = "DPS", goose = true,
+      io = {
+        kind = "redstone",
+        address = "<redstone-component-address>",
+        openSide = 0,   -- sides.bottom
+        closedSide = 1, -- sides.top
+      },
+    },
+    -- Breaker control (double point control: operate open/closed), pulses
+    -- one of two distinct redstone outputs (trip coil / close coil).
+    -- doName is "PosCtl", NOT "Pos" -- a status CDC and its control
+    -- counterpart share an `ln` but can never share a `doName` too (that
+    -- would collide as the same "LN.DOName" addressing key and silently
+    -- clobber one of them in sas/model.lua's points table). See
+    -- model.computePointPairing for how SCADA/HMI find this ref starting
+    -- from the status point above.
+    {
+      ln = "XCBR1", doName = "PosCtl", type = "DPC", goose = false,
+      io = {
+        kind = "redstone",
+        address = "<redstone-component-address>",
+        tripSide = 2,   -- sides.back
+        closeSide = 3,  -- sides.front
+        pulseMs = 250,
+      },
+      sbo = { timeoutSec = 30 },
+    },
+    -- Bus voltage and feeder current, each read from its own physical
+    -- Create: Electro-Energistics gauge block (a voltmeter block and an
+    -- ammeter block -- two separate blocks, NOT one block queried two
+    -- ways). Each requires its own OpenComputers Adapter block placed
+    -- against it -- Create:EE's gauge only exposes a ComputerCraft
+    -- peripheral (verified against the mod's actual source, see
+    -- sas/io/meter.lua's header), and the Adapter is what turns that into
+    -- an OC component at all. Both blocks expose the SAME method name,
+    -- "getValue" -- which quantity comes back depends on which physical
+    -- block that address's Adapter face is touching, not on the method
+    -- name. Find each address with `component.list()` after placing the
+    -- Adapter; confirm with `component.proxy(addr).getMethods()`.
+    --
+    -- Operational caveat: getValue() also bakes in that specific gauge
+    -- block's own in-world display-scale dial (its scroll-value UI) --
+    -- set each gauge's scale to match what `deadband` below assumes (base
+    -- units), since the scale can't be read or overridden from OC.
+    {
+      ln = "MMXU1", doName = "Vol", type = "MV", goose = true, deadband = 2.0,
+      io = { kind = "meter", address = "<createee-voltmeter-adapter-address>", method = "getValue" },
+    },
+    {
+      ln = "MMXU1", doName = "Amp", type = "MV", goose = true, deadband = 0.5,
+      io = { kind = "meter", address = "<createee-ammeter-adapter-address>", method = "getValue" },
+    },
+    -- A spare generic status indicator (GGIO), simple on/off input.
+    {
+      ln = "GGIO1", doName = "Ind1", type = "SPS", goose = false,
+      io = { kind = "redstone", address = "<redstone-component-address>", side = 4, onLevel = 1 },
+    },
+  },
+
+  -- Peer-to-peer safety interlocks (IEC 61850's actual primary GOOSE use
+  -- case): block a local `operate` to a specific control point/value
+  -- while a condition against a PEER IED's GOOSE-sourced point value
+  -- holds true. Evaluated locally on THIS IED (sas/ied/engine.lua's
+  -- handleOperate), after select-before-operate validation succeeds but
+  -- before the physical output is applied -- only `operate` carries the
+  -- target `value`, so `select` is never interlock-checked. Requires
+  -- this IED to have joined the shared `goose.group` above (it always
+  -- does), AND requires the peer's own point to be published with
+  -- `goose = true` in ITS OWN sas-ied.cfg -- an interlock referencing a
+  -- peer point that peer never GOOSE-publishes will always be treated
+  -- as "unknown" (see failOpen below).
+  interlocks = {
+    {
+      id = "BRK1_VS_BRK2",        -- optional; used only in log/error messages
+      localRef = "XCBR1.PosCtl",  -- this IED's own CONTROL point (blocking an operate, not a status read)
+      blockValue = "closed",      -- block operate(localRef, blockValue) while...
+      peerIed = "IED-BRK2",       -- ...this peer IED's iedName...
+      peerRef = "XCBR1.Pos",      -- ...STATUS point (IED-local ref, as published in THEIR goose payload)...
+      condition = "eq",        -- ...compares (eq|ne|lt|gt, same vocabulary as sas-scada.cfg alarms)...
+      peerValue = "closed",    -- ...to this value, true = blocked.
+
+      -- Fail-safe by default: if the peer point has never been heard, or
+      -- its GOOSE has gone stale (see gooseStaleAfterSec above), the
+      -- operate is BLOCKED. Set true to instead let the operate through
+      -- when the peer can't be evaluated (fail-open) -- only appropriate
+      -- for interlocks where availability matters more than this
+      -- specific safety case. Default: false.
+      -- failOpen = false,
+
+      -- Optional per-rule override of gooseStaleAfterSec above.
+      -- staleAfterSec = 15,
+    },
+  },
+
+  -- Named report control blocks (SCL ReportControl): dataset +
+  -- trigger-option-gated reporting, offered to clients by name via
+  -- subscribe{rcbName=...}. SCADA auto-subscribes to the first report an
+  -- IED advertises (see sas/scada/engine.lua's pollIedClient); an IED
+  -- with no reports[] configured falls back to today's unconditional
+  -- "everything, every tick" subscribe{refs="*"} behavior, so this is
+  -- entirely optional/additive.
+  reports = {
+    {
+      name = "rcbStatus1",
+      dataset = { "XCBR1.Pos", "MMXU1.Vol", "MMXU1.Amp", "PTOC1.Op" },
+      trgOps = {
+        dchg = true,   -- report when a dataset point's value changes
+        qchg = true,   -- report when a dataset point's quality changes
+        dupd = false,  -- report even with no real change (approximated here as "don't filter by kind")
+        period = false, -- also report periodically regardless of change (needs periodSec below)
+        gi = true,      -- send the full dataset once, immediately after subscribe
+      },
+      -- periodSec = 10,  -- only used when trgOps.period = true
+      bufTime = 0,        -- minimum seconds between reports to this client (0 = send immediately)
+      confRev = 1,        -- bumped by convention whenever this rcb's dataset/trgOps change
+    },
+  },
+
+  -- Protection function logical nodes (see sas/protection/*.lua).
+  -- Evaluated every tick; a trip LATCHES (stops re-evaluating and won't
+  -- re-pulse the breaker) until iedd restarts.
+  protection = {
+    -- PTOC (time-overcurrent): real trip logic, magnitude-only (see
+    -- MMXU1.Amp's caveat above -- getValue() has no phase angle, but a
+    -- plain overcurrent scheme only ever needs magnitude anyway).
+    ptoc = {
+      {
+        name = "PTOC1",              -- becomes the synthetic status point "PTOC1.Op" (goose=true)
+        input = "MMXU1.Amp",         -- this IED's own MV point to monitor
+        trip = "XCBR1.PosCtl",       -- this IED's own control point to operate on trip
+        pickup = 1.2,                 -- amps; curve math only engages above this
+        curve = "IEC_VERY_INVERSE",   -- see sas/protection/curves.lua for the full list, or "DEFINITE_TIME"
+        timeMultiplier = 0.3,         -- curve time-dial setting (ignored for DEFINITE_TIME)
+        -- definiteTimeSec = 0.5,     -- only used when curve = "DEFINITE_TIME"
+        resetSec = 0.1,               -- accumulator decay rate once back under pickup
+        respectInterlocks = false,    -- protection trips bypass interlocks by default ("protection wins")
+      },
+    },
+    -- PDIF (transformer differential): real trip logic, magnitude-
+    -- restrained (no vector/phase-shift compensation -- see
+    -- sas/protection/pdif.lua's header). Belongs on a dedicated
+    -- transformer-protection IED with its own HV+LV CT meters, NOT on a
+    -- breaker IED -- see remoteTrips below for how it actually trips the
+    -- surrounding breakers it doesn't own. Commented out here since this
+    -- example file is a single breaker IED, not a transformer IED.
+    -- pdif = {
+    --   {
+    --     name = "PDIF1",
+    --     inputs = {
+    --       { ref = "MMXU1.Amp", scale = 1.0 },     -- HV-side CT
+    --       { ref = "MMXU2.Amp", scale = 3.478 },   -- LV-side CT, turns-ratio-normalized to the HV side
+    --     },
+    --     minPickup = 0.2,        -- amps; below this, never trips regardless of restraint
+    --     restraintSlope = 0.4,   -- trips when |diff| > restraintSlope * (|i1|+|i2|)/2
+    --   },
+    -- },
+    -- PDIS (distance): NOT FUNCTIONAL -- see sas/protection/pdis.lua's
+    -- header for why (no phase-angle data source on this hardware).
+    -- Modeled here for data-model completeness only.
+    pdis = {
+      -- {
+      --   name = "PDIS1",
+      --   zone1ReachOhms = 12.5, zone1DelaySec = 0,
+      --   zone2ReachOhms = 25,   zone2DelaySec = 0.3,
+      -- },
+    },
+  },
+
+  -- Cross-IED trip commands: the inverse of `interlocks` above (forces a
+  -- local operate instead of blocking one), for a peer protection
+  -- scheme's synthetic Op point commanding THIS breaker to open -- e.g.
+  -- a transformer IED's PDIF1.Op reaching the two breaker IEDs adjacent
+  -- to its taps. Always bypasses local interlocks (protection commands
+  -- win). Commented out here for the same reason as pdif above -- see
+  -- scl/switchyard.scd's worked example for a live instance.
+  remoteTrips = {
+    -- {
+    --   id = "XFMR1_DIFF_TRIP",
+    --   peerIed = "IED-XFMR1", peerRef = "PDIF1.Op", condition = "eq", peerValue = true,
+    --   localRef = "XCBR1.PosCtl", tripValue = "open",
+    -- },
+  },
+}
