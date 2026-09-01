@@ -55,9 +55,7 @@ def render(station: Station) -> str:
         elements.extend(draw_transformer.draw(
             xfmr.name, hv_point, xfmr.lv_vl.kv, xfmr.lv_vl.taps, band_top,
         ))
-        n = len(xfmr.lv_vl.taps)
-        fan_half_width = max(60 * (n - 1) / 2, 20) + 60
-        max_width = max(max_width, hv_point[0] + fan_half_width)
+        max_width = max(max_width, draw_transformer.max_x(hv_point[0], len(xfmr.lv_vl.taps)))
 
     height = band_top + (draw_transformer.band_height() if station.transformers else 0) + 20
     title = [svg_text(max_width / 2, 30, station.name, text_anchor="middle", font_size=20, font_weight="bold")]

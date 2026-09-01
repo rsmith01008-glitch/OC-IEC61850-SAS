@@ -1,4 +1,5 @@
 import math
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -120,6 +121,23 @@ class TestTransformerBand(unittest.TestCase):
         self.assertIn("XFMR1", elements[0])
         self.assertIn("Feed1", elements[0])
         self.assertIn("Feed2", elements[0])
+
+    def test_single_output_is_offset_right_of_hv_x_not_centered(self):
+        # A centered single output lands exactly under hv_x, visually
+        # reading as a straight continuation of whatever breaker sits
+        # above it in the switchyard strip -- see this module's header.
+        hv_x = 100.0
+        svg = draw_transformer.draw(
+            "XFMR1", hv_point=(hv_x, 50.0), lv_kv=230,
+            lv_outputs=[Tap("Feed1", TapKind.FEEDER)], band_top=0.0,
+        )[0]
+        m = re.search(r'<text x="([\d.+-]+)"[^>]*>Feed1<', svg)
+        self.assertIsNotNone(m)
+        self.assertGreater(float(m.group(1)), hv_x + 30)
+
+    def test_max_x_grows_with_output_count_and_clears_hv_x(self):
+        self.assertGreater(draw_transformer.max_x(100.0, 1), 100.0)
+        self.assertLess(draw_transformer.max_x(100.0, 1), draw_transformer.max_x(100.0, 3))
 
 
 class TestOneLineDiagramRender(unittest.TestCase):

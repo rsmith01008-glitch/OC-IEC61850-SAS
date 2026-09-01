@@ -13,6 +13,13 @@ together in x are not collision-avoided beyond that. Both are fine for
 this tool's common case (one real switchyard, a handful of transformers)
 and are schematic-diagram simplifications consistent with the rest of
 this drawer's "not to scale" scope.
+
+The LV output fan is deliberately offset entirely to the right of the
+HV connector's own x (`hv_x`), never centered on/under it -- a centered
+fan puts one output (always, for an odd count, exactly one) directly
+under `hv_x`, which visually reads as a straight continuation of
+whichever breaker sits directly above `hv_x` in the switchyard strip,
+rather than as a distinct device hanging off to the side.
 """
 
 from ..topology import TapKind
@@ -35,6 +42,14 @@ def band_height() -> float:
     return _SYMBOL_GAP + _BUS_GAP + _OUTPUT_GAP + 40
 
 
+def max_x(hv_x: float, n_outputs: int) -> float:
+    """Rightmost x-coordinate this transformer's fan (offset entirely to
+    the right of `hv_x`, see this module's header) reaches -- callers
+    use this to size the canvas width.
+    """
+    return hv_x + _OUTPUT_PITCH * n_outputs + 50
+
+
 def draw(xfmr_name: str, hv_point, lv_kv: float, lv_outputs: list, band_top: float) -> list:
     """`lv_outputs` is `xfmr.lv_vl.taps` (a list of Tap: name + kind).
     Returns a flat list of SVG element strings.
@@ -55,12 +70,13 @@ def draw(xfmr_name: str, hv_point, lv_kv: float, lv_outputs: list, band_top: flo
     elements.append(svg_line(hv_x, symbol_y + _RADIUS, hv_x, bus_y, stroke="#333", stroke_width=2))
 
     n = len(lv_outputs)
-    bus_half_width = max(_OUTPUT_PITCH * (n - 1) / 2, 20)
-    elements.append(svg_line(hv_x - bus_half_width, bus_y, hv_x + bus_half_width, bus_y,
-                              stroke="#333", stroke_width=3))
-    elements.append(svg_text(hv_x + bus_half_width + 10, bus_y + 4, "%g kV" % lv_kv, font_size=10, fill="#666"))
+    # Offset entirely to the right of hv_x (never centered on it) -- see
+    # this module's header for why.
+    start_x = hv_x + _OUTPUT_PITCH
+    end_x = start_x + (n - 1) * _OUTPUT_PITCH
+    elements.append(svg_line(hv_x, bus_y, end_x, bus_y, stroke="#333", stroke_width=3))
+    elements.append(svg_text(end_x + 10, bus_y + 4, "%g kV" % lv_kv, font_size=10, fill="#666"))
 
-    start_x = hv_x - _OUTPUT_PITCH * (n - 1) / 2
     for i, tap in enumerate(lv_outputs):
         x = start_x + i * _OUTPUT_PITCH
         elements.append(svg_line(x, bus_y, x, output_y, stroke="#333", stroke_width=2))
