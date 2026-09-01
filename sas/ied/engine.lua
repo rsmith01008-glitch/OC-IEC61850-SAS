@@ -15,6 +15,9 @@ local sbo = require("sas.sbo")
 local io_rs = require("sas.io.redstone")
 local meter = require("sas.io.meter")
 local util = require("sas.util")
+local ptocmod = require("sas.protection.ptoc")
+local pdifmod = require("sas.protection.pdif")
+local pdismod = require("sas.protection.pdis")
 
 local engine = {}
 
@@ -32,6 +35,19 @@ local DEFAULTS = {
   gooseStaleAfterSec = 15,
   points = {},
   interlocks = {},
+  -- Protection function logical nodes -- see sas/protection/*.lua.
+  -- ptoc (overcurrent) and pdif (differential) have real trip logic;
+  -- pdis (distance) is modeled for completeness only, never trips (see
+  -- sas/protection/pdis.lua's header for why).
+  protection = { ptoc = {}, pdif = {}, pdis = {} },
+  -- Cross-IED trip commands: forces a local control point to `tripValue`
+  -- when a PEER IED's GOOSE-sourced point satisfies `condition`/
+  -- `peerValue` -- e.g. a transformer's differential-protection Op point
+  -- commanding the adjacent breaker IEDs to open, since the transformer
+  -- IED doesn't own those breakers itself. Structurally the inverse of
+  -- `interlocks` (forces an operate instead of blocking one); always
+  -- bypasses local interlocks, matching "protection commands win".
+  remoteTrips = {},
 }
 
 -- Condition vocabulary for interlock rules, deliberately duplicated from
@@ -61,6 +77,8 @@ engine.state = {
   lastIntegrityAt = nil,
   tickTimerId = nil,
   log = {},
+  protection = { ptoc = {}, pdif = {} },  -- runtime state parallel to cfg.protection.{ptoc,pdif} by index
+  remoteTripState = {},                    -- runtime state parallel to cfg.remoteTrips by index
 }
 
 engine.log = util.makeLogger(engine.state.log, 200)
@@ -195,6 +213,52 @@ local function interlockBlocks(ref, targetValue, now)
     end
   end
   return false
+end
+
+-- Applies a protection-initiated trip. `localTripRef` is nil for a
+-- scheme with no local control target of its own (e.g. PDIF on a
+-- transformer IED that doesn't own the breakers it must trip -- see
+-- `remoteTrips` above), in which case this only sets the scheme's
+-- synthetic Op indication.
+--
+-- Deliberately bypasses select-before-operate entirely, unlike
+-- handleOperate's client-initiated path -- matches real substation
+-- practice: protection trips are direct-with-normal-security, never
+-- SBO, since SBO exists to guard slow *human* commands against
+-- fat-fingering/comms corruption, not time-critical automatic ones.
+-- Whether a local trip still respects interlockBlocks is a per-scheme
+-- `respectInterlocks` config flag (default false -- "protection always
+-- wins" -- overridable per scheme).
+local function tripFromProtection(schemeCfg, localTripRef, tripValue, now)
+  if localTripRef then
+    local rec = engine.state.db.points[localTripRef]
+    if not rec or not model.CONTROL_TYPES[rec.type] then
+      engine.log("error", "protection: %s trip target is not a control point: %s",
+        schemeCfg.name, tostring(localTripRef))
+      return nil, "not a control point"
+    end
+    if schemeCfg.respectInterlocks then
+      local blocked, reason = interlockBlocks(localTripRef, tripValue, now)
+      if blocked then
+        engine.log("warn", "protection: %s trip on %s blocked by interlock: %s",
+          schemeCfg.name, localTripRef, reason)
+        return nil, reason
+      end
+    end
+    local ok, err = applyOperate(rec, tripValue)
+    if not ok then
+      engine.log("error", "protection: %s trip on %s failed: %s", schemeCfg.name, localTripRef, tostring(err))
+      return nil, err
+    end
+  end
+
+  local opRec = engine.state.db.points[model.ref(schemeCfg.name, "Op")]
+  if opRec then
+    model.setValue(opRec, true, "good", now)
+  end
+  engine.log("warn", "protection: %s OPERATED%s", schemeCfg.name,
+    localTripRef and (" (" .. localTripRef .. " -> " .. tostring(tripValue) .. ")") or "")
+  return true
 end
 
 local function handleOperate(client, msg)
@@ -405,6 +469,99 @@ local function receiveGoosePeers(now)
   end
 end
 
+-- Evaluates every configured protection scheme against current point
+-- readings, applying real trip logic for ptoc/pdif (pdis never trips --
+-- see sas/protection/pdis.lua). Each scheme LATCHES on its first trip
+-- (via engine.state.protection.{ptoc,pdif}[i].latched) and stops
+-- re-evaluating until iedd restarts -- without this, a sustained fault
+-- condition would re-trip (re-pulse the breaker, re-log, re-report)
+-- every single tick forever. Returns the list of refs that changed
+-- (the scheme's own "<name>.Op" point, plus a ptoc's local trip target).
+local function evaluateProtection(now)
+  local changed = {}
+  local cfg = engine.state.cfg
+
+  for i, pcfg in ipairs(cfg.protection.ptoc) do
+    local state = engine.state.protection.ptoc[i]
+    if not state.latched then
+      local dt = now - (state.lastEvalAt or now)
+      if dt <= 0 then dt = cfg.tickIntervalSec end
+      state.lastEvalAt = now
+
+      local inputRec = engine.state.db.points[pcfg.input]
+      local measured = (inputRec and inputRec.quality == "good") and inputRec.value or nil
+      if ptocmod.tick(state, pcfg, measured, dt) then
+        state.latched = true
+        -- Control points (DPC/SPC) never populate .value/.quality in
+        -- this codebase's model (only status/MV points do, via
+        -- pollPoints) -- reporting pcfg.trip itself as "changed" would
+        -- always carry a nil/invalid payload, so only the Op point
+        -- (which DOES carry a real true/false) goes into `changed`, and
+        -- only if the trip actually applied (tripFromProtection can fail
+        -- -- not a control point, interlocked, or the physical operate
+        -- itself failing -- in which case Op was never set, so reporting
+        -- a "change" would be a false report).
+        local applied = tripFromProtection(pcfg, pcfg.trip, "open", now)
+        if applied then
+          table.insert(changed, model.ref(pcfg.name, "Op"))
+        end
+      end
+    end
+  end
+
+  for i, pcfg in ipairs(cfg.protection.pdif) do
+    local state = engine.state.protection.pdif[i]
+    if not state.latched then
+      local values = {}
+      for j, input in ipairs(pcfg.inputs) do
+        local rec = engine.state.db.points[input.ref]
+        values[j] = (rec and rec.quality == "good") and rec.value or nil
+      end
+      if pdifmod.evaluate(pcfg, values) then
+        state.latched = true
+        local applied = tripFromProtection(pcfg, nil, nil, now)
+        if applied then
+          table.insert(changed, model.ref(pcfg.name, "Op"))
+        end
+      end
+    end
+  end
+
+  return changed
+end
+
+-- Cross-IED trip commands (see `remoteTrips` in DEFAULTS): reacts to a
+-- peer IED's GOOSE-sourced point (typically another scheme's synthetic
+-- Op indication, itself GOOSE-published like any other point) by forcing
+-- a local control point to a target value -- reusing the same
+-- receiveGoosePeers-populated peer tracking interlockBlocks already
+-- reads, no new transport. Always bypasses local interlocks (protection
+-- commands win, same convention as tripFromProtection's default) and
+-- latches per-rule so a peer Op staying true doesn't re-pulse every tick.
+local function remoteTripCheck(now)
+  for i, rule in ipairs(engine.state.cfg.remoteTrips) do
+    local state = engine.state.remoteTripState[i]
+    if not state.latched then
+      local peerEntry = engine.state.peers[rule.peerIed]
+      local peerPoint = peerEntry and peerEntry.points[rule.peerRef]
+      if peerPoint and peerPoint.quality == "good" and CONDITIONS[rule.condition](peerPoint.value, rule.peerValue) then
+        local rec = engine.state.db.points[rule.localRef]
+        if rec and model.CONTROL_TYPES[rec.type] then
+          state.latched = true
+          engine.log("warn", "protection: remote trip %s: %s/%s -> local %s = %s",
+            rule.id or rule.localRef, rule.peerIed, rule.peerRef, rule.localRef, tostring(rule.tripValue))
+          -- Not reporting rule.localRef into `changed`: like
+          -- evaluateProtection's ptoc trip target, a control point never
+          -- populates .value/.quality in this model, so there's no real
+          -- change to report -- the resulting physical breaker motion
+          -- shows up through the normal STATUS point poll instead.
+          applyOperate(rec, rule.tripValue)
+        end
+      end
+    end
+  end
+end
+
 function engine.tick()
   local ok, err = pcall(function()
     local now = computer.uptime()
@@ -415,6 +572,9 @@ function engine.tick()
     receiveGoosePeers(now)
 
     local changedRefs = pollPoints(now)
+    for _, ref in ipairs(evaluateProtection(now)) do table.insert(changedRefs, ref) end
+    remoteTripCheck(now)
+
     deliverReports(changedRefs)
     publishGoose(changedRefs, now)
 
@@ -457,6 +617,76 @@ local function validateInterlocks(db, interlocks)
   return true
 end
 
+-- Same shape as validateInterlocks, for the inverse relation (forces an
+-- operate instead of blocking one). Returns true, or nil, err.
+local function validateRemoteTrips(db, remoteTrips)
+  for i, rule in ipairs(remoteTrips) do
+    local rec = type(rule.localRef) == "string" and db.points[rule.localRef]
+    if not rec then
+      return nil, "remoteTrips[" .. i .. "]: unknown localRef " .. tostring(rule.localRef)
+    end
+    if not model.CONTROL_TYPES[rec.type] then
+      return nil, "remoteTrips[" .. i .. "]: localRef " .. rule.localRef .. " is not a control point"
+    end
+    if rule.tripValue == nil then
+      return nil, "remoteTrips[" .. i .. "]: missing tripValue"
+    end
+    if type(rule.peerIed) ~= "string" or type(rule.peerRef) ~= "string" then
+      return nil, "remoteTrips[" .. i .. "]: peerIed/peerRef must be strings"
+    end
+    if not CONDITIONS[rule.condition] then
+      return nil, "remoteTrips[" .. i .. "]: unknown condition " .. tostring(rule.condition)
+    end
+    if rule.peerValue == nil then
+      return nil, "remoteTrips[" .. i .. "]: missing peerValue"
+    end
+  end
+  return true
+end
+
+-- Hard-validates every protection[] scheme against the point database.
+-- Returns true, or nil, err.
+local function validateProtection(db, protection)
+  local function resolvePoint(ref) return db.points[ref] end
+  local function isControlType(t) return model.CONTROL_TYPES[t] == true end
+
+  for _, pcfg in ipairs(protection.ptoc) do
+    local ok, err = ptocmod.validate(pcfg, resolvePoint, isControlType)
+    if not ok then return nil, err end
+  end
+  for _, pcfg in ipairs(protection.pdif) do
+    local ok, err = pdifmod.validate(pcfg, resolvePoint)
+    if not ok then return nil, err end
+  end
+  for _, pcfg in ipairs(protection.pdis) do
+    local ok, err = pdismod.validate(pcfg)
+    if not ok then return nil, err end
+  end
+  return true
+end
+
+-- Registers one synthetic SPS "<schemeName>.Op" point per configured
+-- protection scheme (mirrors real IEC 61850's Op ACT-CDC output every
+-- protection LN class has) -- io=nil since it's never polled from
+-- hardware, only ever written by tripFromProtection. goose=true so a
+-- trip is visible to peer IEDs via the same GOOSE path as any other
+-- point (this is what makes `remoteTrips` possible with no new
+-- transport). Reuses the existing status/report/GOOSE/historian
+-- pipelines for "protection operated" with zero new plumbing.
+local function registerProtectionOpPoints(db, protection)
+  local function register(schemeName)
+    local ref = model.ref(schemeName, "Op")
+    db.points[ref] = {
+      ln = schemeName, doName = "Op", type = "SPS",
+      io = nil, goose = true, deadband = 0, sbo = nil,
+      value = false, quality = "good", lastChangeAt = nil, lastPublishedAt = nil,
+    }
+  end
+  for _, pcfg in ipairs(protection.ptoc) do register(pcfg.name) end
+  for _, pcfg in ipairs(protection.pdif) do register(pcfg.name) end
+  for _, pcfg in ipairs(protection.pdis) do register(pcfg.name) end
+end
+
 -- Idempotent: calling start() while already running is a no-op success.
 function engine.start()
   if engine.state.running then return true end
@@ -475,13 +705,24 @@ function engine.start()
   end
   engine.state.db = dbResult
   engine.state.iedName = cfg.iedName
+  registerProtectionOpPoints(engine.state.db, cfg.protection)
 
-  -- A misconfigured safety interlock must refuse to start the daemon,
-  -- not silently no-op.
+  -- A misconfigured safety interlock/protection scheme/remote-trip rule
+  -- must refuse to start the daemon, not silently no-op.
   local ivOk, ivErr = validateInterlocks(engine.state.db, cfg.interlocks)
   if not ivOk then
     engine.log("error", "ied: invalid interlock configuration: %s", tostring(ivErr))
     return nil, ivErr
+  end
+  local rtOk, rtErr = validateRemoteTrips(engine.state.db, cfg.remoteTrips)
+  if not rtOk then
+    engine.log("error", "ied: invalid remoteTrips configuration: %s", tostring(rtErr))
+    return nil, rtErr
+  end
+  local pOk, pErr = validateProtection(engine.state.db, cfg.protection)
+  if not pOk then
+    engine.log("error", "ied: invalid protection configuration: %s", tostring(pErr))
+    return nil, pErr
   end
 
   -- Fails loudly (no retry loop) if ipstackd isn't running -- matches
@@ -525,6 +766,23 @@ function engine.start()
   engine.state.peers = {}
   engine.state.lastIntegrityAt = nil
 
+  engine.state.protection = { ptoc = {}, pdif = {} }
+  for i in ipairs(cfg.protection.ptoc) do
+    local s = ptocmod.newState()
+    s.latched = false
+    engine.state.protection.ptoc[i] = s
+  end
+  for i in ipairs(cfg.protection.pdif) do
+    engine.state.protection.pdif[i] = { latched = false }
+  end
+  for _, pcfg in ipairs(cfg.protection.pdis) do
+    pdismod.logInert(engine.log, pcfg)
+  end
+  engine.state.remoteTripState = {}
+  for i in ipairs(cfg.remoteTrips) do
+    engine.state.remoteTripState[i] = { latched = false }
+  end
+
   engine.state.tickTimerId = event.timer(cfg.tickIntervalSec, engine.tick, math.huge)
   engine.state.running = true
 
@@ -556,6 +814,8 @@ function engine.stop()
     engine.state.mcastSock = nil
   end
   engine.state.peers = {}
+  engine.state.protection = { ptoc = {}, pdif = {} }
+  engine.state.remoteTripState = {}
 
   engine.state.running = false
   engine.log("info", "iedd stopped")

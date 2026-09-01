@@ -152,4 +152,69 @@
       -- staleAfterSec = 15,
     },
   },
+
+  -- Protection function logical nodes (see sas/protection/*.lua).
+  -- Evaluated every tick; a trip LATCHES (stops re-evaluating and won't
+  -- re-pulse the breaker) until iedd restarts.
+  protection = {
+    -- PTOC (time-overcurrent): real trip logic, magnitude-only (see
+    -- MMXU1.Amp's caveat above -- getValue() has no phase angle, but a
+    -- plain overcurrent scheme only ever needs magnitude anyway).
+    ptoc = {
+      {
+        name = "PTOC1",              -- becomes the synthetic status point "PTOC1.Op" (goose=true)
+        input = "MMXU1.Amp",         -- this IED's own MV point to monitor
+        trip = "XCBR1.PosCtl",       -- this IED's own control point to operate on trip
+        pickup = 1.2,                 -- amps; curve math only engages above this
+        curve = "IEC_VERY_INVERSE",   -- see sas/protection/curves.lua for the full list, or "DEFINITE_TIME"
+        timeMultiplier = 0.3,         -- curve time-dial setting (ignored for DEFINITE_TIME)
+        -- definiteTimeSec = 0.5,     -- only used when curve = "DEFINITE_TIME"
+        resetSec = 0.1,               -- accumulator decay rate once back under pickup
+        respectInterlocks = false,    -- protection trips bypass interlocks by default ("protection wins")
+      },
+    },
+    -- PDIF (transformer differential): real trip logic, magnitude-
+    -- restrained (no vector/phase-shift compensation -- see
+    -- sas/protection/pdif.lua's header). Belongs on a dedicated
+    -- transformer-protection IED with its own HV+LV CT meters, NOT on a
+    -- breaker IED -- see remoteTrips below for how it actually trips the
+    -- surrounding breakers it doesn't own. Commented out here since this
+    -- example file is a single breaker IED, not a transformer IED.
+    -- pdif = {
+    --   {
+    --     name = "PDIF1",
+    --     inputs = {
+    --       { ref = "MMXU1.Amp", scale = 1.0 },     -- HV-side CT
+    --       { ref = "MMXU2.Amp", scale = 3.478 },   -- LV-side CT, turns-ratio-normalized to the HV side
+    --     },
+    --     minPickup = 0.2,        -- amps; below this, never trips regardless of restraint
+    --     restraintSlope = 0.4,   -- trips when |diff| > restraintSlope * (|i1|+|i2|)/2
+    --   },
+    -- },
+    -- PDIS (distance): NOT FUNCTIONAL -- see sas/protection/pdis.lua's
+    -- header for why (no phase-angle data source on this hardware).
+    -- Modeled here for data-model completeness only.
+    pdis = {
+      -- {
+      --   name = "PDIS1",
+      --   zone1ReachOhms = 12.5, zone1DelaySec = 0,
+      --   zone2ReachOhms = 25,   zone2DelaySec = 0.3,
+      -- },
+    },
+  },
+
+  -- Cross-IED trip commands: the inverse of `interlocks` above (forces a
+  -- local operate instead of blocking one), for a peer protection
+  -- scheme's synthetic Op point commanding THIS breaker to open -- e.g.
+  -- a transformer IED's PDIF1.Op reaching the two breaker IEDs adjacent
+  -- to its taps. Always bypasses local interlocks (protection commands
+  -- win). Commented out here for the same reason as pdif above -- see
+  -- scl/switchyard.scd's worked example for a live instance.
+  remoteTrips = {
+    -- {
+    --   id = "XFMR1_DIFF_TRIP",
+    --   peerIed = "IED-XFMR1", peerRef = "PDIF1.Op", condition = "eq", peerValue = true,
+    --   localRef = "XCBR1.PosCtl", tripValue = "open",
+    -- },
+  },
 }
