@@ -19,18 +19,16 @@ _DRAWERS = {
 
 def render(station: Station) -> str:
     # Highest kV on top, matching real single-line-diagram convention.
+    # Only REAL, user-chosen switchyards get a strip -- a transformer's
+    # LV side is never one (see generator/layouts/transformer_lv.py).
     ordered_vls = sorted(station.voltage_levels, key=lambda vl: vl.kv, reverse=True)
 
     elements = []
-    tap_positions = {}          # TapNode -> (x, y), across every VL
-    strip_bottom_y = {}         # vl_name -> y of the strip's bottom edge
-    strip_top_y = {}            # vl_name -> y of the strip's top edge
+    tap_positions = {}          # TapNode -> (x, y), across every real strip
 
     max_width = 0.0
     for rank, vl in enumerate(ordered_vls):
         top = geo.strip_y0(rank)
-        strip_top_y[vl.vl_name] = top
-        strip_bottom_y[vl.vl_name] = top + geo.STRIP_HEIGHT
 
         drawer = _DRAWERS[vl.layout_kind]
         vl_elements, vl_tap_positions = drawer(vl, top)
@@ -39,20 +37,27 @@ def render(station: Station) -> str:
 
         if vl.layout_kind == LayoutKind.RING_BUS:
             width = 2 * (geo.ring_radius(len(vl.taps)) + 70) + geo.LEFT_MARGIN
+        elif vl.layout_kind == LayoutKind.BREAKER_AND_HALF:
+            # One vertical string per diameter (not per tap) -- see
+            # draw_breaker_and_half.py.
+            width = geo.diameter_strip_width(len(vl.taps) // 2) + geo.LEFT_MARGIN
         else:
             n_slots = len(vl.taps) + (1 if vl.layout_kind == LayoutKind.MAIN_AND_TRANSFER else 0)
             width = geo.strip_width(n_slots) + geo.LEFT_MARGIN
         max_width = max(max_width, width)
 
+    # Every transformer's symbol+LV-output-fan hangs in one shared band
+    # below the bottom of every real strip -- see draw_transformer.py's
+    # header for why (and its documented simplification).
+    band_top = geo.total_height(len(ordered_vls)) - 20
     for xfmr in station.transformers:
         hv_point = tap_positions[xfmr.hv_tap]
-        lv_point = tap_positions[xfmr.lv_tap]
         elements.extend(draw_transformer.draw(
-            xfmr.name, hv_point, lv_point,
-            strip_bottom_y[xfmr.hv_vl.vl_name], strip_top_y[xfmr.lv_vl.vl_name],
+            xfmr.name, hv_point, xfmr.lv_vl.kv, xfmr.lv_vl.taps, band_top,
         ))
+        max_width = max(max_width, draw_transformer.max_x(hv_point[0], len(xfmr.lv_vl.taps)))
 
-    height = geo.total_height(len(ordered_vls))
+    height = band_top + (draw_transformer.band_height() if station.transformers else 0) + 20
     title = [svg_text(max_width / 2, 30, station.name, text_anchor="middle", font_size=20, font_weight="bold")]
 
     body = "\n".join(title + elements)

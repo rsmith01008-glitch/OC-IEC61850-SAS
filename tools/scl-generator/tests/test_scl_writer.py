@@ -16,9 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scl-comp
 from lxml import etree
 
 from generator.topology import (
-    Station, Tap, TapKind, Transformer, NetworkDefaults, ProtectionDefaults,
+    Station, Tap, TapKind, NetworkDefaults, ProtectionDefaults,
 )
-from generator.layouts import breaker_and_half, single_bus
+from generator.layouts import breaker_and_half, single_bus, transformer_lv
 from generator import scl_writer
 
 from scl.validate import validate_xsd, SclValidationError
@@ -40,18 +40,18 @@ def _minimal_station():
 
 
 def _transformer_station():
-    """Reproduces switchyard.scd's own shape: two 1.5-breaker VLs joined
-    by one transformer.
+    """One real 1.5-breaker switchyard (V800) with a transformer tapping
+    one diameter; the transformer's LV side is a simple disconnect-only
+    output stub (see generator/layouts/transformer_lv.py), never a
+    second switchyard -- matches the corrected architecture.
     """
     hv_taps = _taps(("Line1", TapKind.LINE), ("XfmrHV", TapKind.TRANSFORMER))
-    lv_taps = _taps(("XfmrLV", TapKind.TRANSFORMER), ("Feed1", TapKind.FEEDER))
     hv_vl = breaker_and_half.build("V800", 800, hv_taps, start_index=1)
-    lv_vl = breaker_and_half.build("V230", 230, lv_taps, start_index=4)
-    xfmr = Transformer(
-        name="XFMR1", hv_vl=hv_vl, hv_tap=hv_vl.tap_node_for(hv_taps[1]),
-        lv_vl=lv_vl, lv_tap=lv_vl.tap_node_for(lv_taps[0]),
+    hv_tap = hv_vl.tap_node_for(hv_taps[1])
+    xfmr = transformer_lv.build_transformer(
+        "XFMR1", hv_vl, hv_tap, lv_kv=230, lv_outputs=[("Feed1", TapKind.FEEDER)],
     )
-    return Station(name="Switchyard2", voltage_levels=[hv_vl, lv_vl], transformers=[xfmr])
+    return Station(name="Switchyard2", voltage_levels=[hv_vl], transformers=[xfmr])
 
 
 class TestWriteWellFormed(unittest.TestCase):
@@ -127,22 +127,26 @@ class TestCompilesThroughRealPipeline(unittest.TestCase):
             scd_path = Path(tmp) / "test.scd"
             scd_path.write_bytes(scl_writer.to_string(scl_writer.write(_transformer_station())))
             outputs = compile_scd(str(scd_path), validate_schema=True)
-            # 6 breakers + 1 transformer + 1 scada
-            self.assertEqual(len(outputs), 8)
-            self.assertIn("sas-ied-xfmr1.cfg", outputs)
-            self.assertIn("sas-scada.cfg", outputs)
+            # 3 breakers (one diameter) + 1 transformer + 1 scada -- the
+            # diameter's own isolating DIS (CB1DA/CB1DB/... -- see
+            # generator/layouts/common.py) and the transformer's LV
+            # output DIS get no IED of their own, same as every DIS.
+            self.assertEqual(set(outputs.keys()), {
+                "sas-ied-cb1.cfg", "sas-ied-cb2.cfg", "sas-ied-cb3.cfg",
+                "sas-ied-xfmr1.cfg", "sas-scada.cfg",
+            })
 
     def test_transformer_station_remote_trips_present_in_compiled_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             scd_path = Path(tmp) / "test.scd"
             scd_path.write_bytes(scl_writer.to_string(scl_writer.write(_transformer_station())))
             outputs = compile_scd(str(scd_path), validate_schema=True)
-            # CB2/CB3 bound the HV tap, CB4/CB5 bound the LV tap.
-            for name in ("sas-ied-cb2.cfg", "sas-ied-cb3.cfg", "sas-ied-cb4.cfg", "sas-ied-cb5.cfg"):
+            # CB2/CB3 bound the HV tap (XfmrHV); CB1 (Line1's own leg)
+            # does not.
+            for name in ("sas-ied-cb2.cfg", "sas-ied-cb3.cfg"):
                 self.assertIn("remoteTrips", outputs[name])
                 self.assertIn("XFMR1", outputs[name])
-            for name in ("sas-ied-cb1.cfg", "sas-ied-cb6.cfg"):
-                self.assertNotIn("remoteTrips", outputs[name])
+            self.assertNotIn("remoteTrips", outputs["sas-ied-cb1.cfg"])
 
 
 if __name__ == "__main__":
