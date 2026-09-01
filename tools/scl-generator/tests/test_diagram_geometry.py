@@ -139,6 +139,22 @@ class TestTransformerBand(unittest.TestCase):
         self.assertGreater(draw_transformer.max_x(100.0, 1), 100.0)
         self.assertLess(draw_transformer.max_x(100.0, 1), draw_transformer.max_x(100.0, 3))
 
+    def test_winding_symbol_itself_is_offset_off_the_hv_tap_column(self):
+        # The whole body (not just the LV fan) must be jogged off hv_x,
+        # not just drawn on a straight vertical line down from the tap --
+        # a straight run reads as if the HV side ties directly to
+        # whatever breaker/bus sits below the tap in the switchyard
+        # column (see this module's header).
+        hv_x = 100.0
+        svg = draw_transformer.draw(
+            "XFMR1", hv_point=(hv_x, 50.0), lv_kv=230,
+            lv_outputs=[Tap("Feed1", TapKind.FEEDER)], band_top=0.0,
+        )[0]
+        circle_cx = [float(m) for m in re.findall(r'<circle cx="([\d.+-]+)"', svg)]
+        self.assertTrue(circle_cx)
+        for cx in circle_cx:
+            self.assertGreater(abs(cx - hv_x), 30)
+
 
 class TestOneLineDiagramRender(unittest.TestCase):
     """Full-Station smoke tests: the diagram must be well-formed SVG
