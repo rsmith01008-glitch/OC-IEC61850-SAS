@@ -258,13 +258,30 @@ end
 
 local function handleGetModel(client, msg)
   local points = {}
+  local byIed = {}
   model.eachAggregatePoint(engine.state.db, function(iedName, ref, rec)
     local aggEntry = engine.state.db.ieds[iedName]
-    table.insert(points, {
+    local p = {
       ln = rec.ln, doName = rec.doName, type = rec.type,
       fullRef = model.fullRef(iedName, aggEntry.ld or "?", rec.ln, rec.doName),
-    })
+    }
+    table.insert(points, p)
+    local group = byIed[iedName]
+    if not group then group = {}; byIed[iedName] = group end
+    table.insert(group, p)
   end)
+  -- Cross-reference each status point to its control counterpart (and
+  -- vice versa) so the HMI knows which ref to select/operate against
+  -- when the operator clicks a status tile -- see
+  -- model.computePointPairing's header for why this can't be guessed
+  -- from the status ref alone. Grouped per-IED first since `ln`
+  -- uniqueness is IED-scoped, not global across the aggregate.
+  for iedName, group in pairs(byIed) do
+    local aggEntry = engine.state.db.ieds[iedName]
+    model.computePointPairing(group, "pairedFullRef", function(ln, doName)
+      return model.fullRef(iedName, aggEntry.ld or "?", ln, doName)
+    end)
+  end
   sendMsg(client, messages.replyTo(msg, { ld = "SCADA", points = points }))
 end
 

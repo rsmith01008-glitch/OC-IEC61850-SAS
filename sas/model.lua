@@ -48,6 +48,47 @@ function model.splitRef(ref)
   return ln, doName
 end
 
+-- A status CDC (SPS/DPS) and its control counterpart (SPC/DPC) for the
+-- same physical point (e.g. a breaker's position status and its trip/
+-- close control) are two separate point records sharing one `ln` --
+-- they CANNOT share a `doName` too, since "LN.DOName" is the addressing
+-- key (model.ref) and a collision would silently clobber one of them.
+-- Convention used throughout this codebase: the control counterpart's
+-- doName is the status doName + "Ctl" (e.g. status "Pos", control
+-- "PosCtl" -- see etc/sas-ied.cfg.example's XCBR1.Pos/XCBR1.PosCtl).
+--
+-- Given a list of point descriptors {ln, doName, type, ...} that all
+-- share one addressing scope (one IED's own points, or one IED's slice
+-- of SCADA's aggregate), sets `refField` on each descriptor to
+-- `refFn(ln, counterpartDoName)` -- letting a caller (e.g. an HMI) find
+-- "click this status tile, but select/operate against THAT ref" without
+-- string-guessing the "Ctl" suffix itself. `refFn(ln, doName)` builds
+-- whatever ref format the caller needs (IED-local vs SCADA-facing
+-- fullRef). Only pairs when a `ln` group has exactly one status and
+-- exactly one control point; ambiguous or absent otherwise, left unset.
+function model.computePointPairing(points, refField, refFn)
+  local byLn = {}
+  for _, p in ipairs(points) do
+    local group = byLn[p.ln]
+    if not group then group = {}; byLn[p.ln] = group end
+    table.insert(group, p)
+  end
+  for ln, group in pairs(byLn) do
+    local statusPt, controlPt, ambiguous = nil, nil, false
+    for _, p in ipairs(group) do
+      if model.STATUS_TYPES[p.type] then
+        if statusPt then ambiguous = true else statusPt = p end
+      elseif model.CONTROL_TYPES[p.type] then
+        if controlPt then ambiguous = true else controlPt = p end
+      end
+    end
+    if statusPt and controlPt and not ambiguous then
+      statusPt[refField] = refFn(ln, controlPt.doName)
+      controlPt[refField] = refFn(ln, statusPt.doName)
+    end
+  end
+end
+
 -- Builds an IED's own point database from its /etc/sas-ied.cfg contents.
 -- Returns { ld = cfg.logicalDevice, points = { [ref] = pointRecord } }.
 -- Each pointRecord carries the config point definition plus live-value

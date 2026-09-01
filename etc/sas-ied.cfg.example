@@ -69,8 +69,14 @@
     },
     -- Breaker control (double point control: operate open/closed), pulses
     -- one of two distinct redstone outputs (trip coil / close coil).
+    -- doName is "PosCtl", NOT "Pos" -- a status CDC and its control
+    -- counterpart share an `ln` but can never share a `doName` too (that
+    -- would collide as the same "LN.DOName" addressing key and silently
+    -- clobber one of them in sas/model.lua's points table). See
+    -- model.computePointPairing for how SCADA/HMI find this ref starting
+    -- from the status point above.
     {
-      ln = "XCBR1", doName = "Pos", type = "DPC", goose = false,
+      ln = "XCBR1", doName = "PosCtl", type = "DPC", goose = false,
       io = {
         kind = "redstone",
         address = "<redstone-component-address>",
@@ -126,11 +132,11 @@
   -- as "unknown" (see failOpen below).
   interlocks = {
     {
-      id = "BRK1_VS_BRK2",     -- optional; used only in log/error messages
-      localRef = "XCBR1.Pos",  -- this IED's own point (IED-local ref, matches `points` above)
-      blockValue = "closed",   -- block operate(localRef, blockValue) while...
-      peerIed = "IED-BRK2",    -- ...this peer IED's iedName...
-      peerRef = "XCBR1.Pos",   -- ...point (IED-local ref, as published in THEIR goose payload)...
+      id = "BRK1_VS_BRK2",        -- optional; used only in log/error messages
+      localRef = "XCBR1.PosCtl",  -- this IED's own CONTROL point (blocking an operate, not a status read)
+      blockValue = "closed",      -- block operate(localRef, blockValue) while...
+      peerIed = "IED-BRK2",       -- ...this peer IED's iedName...
+      peerRef = "XCBR1.Pos",      -- ...STATUS point (IED-local ref, as published in THEIR goose payload)...
       condition = "eq",        -- ...compares (eq|ne|lt|gt, same vocabulary as sas-scada.cfg alarms)...
       peerValue = "closed",    -- ...to this value, true = blocked.
 

@@ -197,20 +197,22 @@ local function buildMimic()
     if p.type == "DPS" or p.type == "SPS" then
       local widget = mimicPanel:addChild(GUI.button(x, y, 16, 1, 0x444444, 0xFFFFFF, 0x666666, 0xFFFFFF, label))
       p.widget = widget
-      -- Only DPC/SPC control points open a control dialog; pure status
-      -- points (no matching control counterpart) are display-only, but we
-      -- don't distinguish that here for simplicity -- clicking a status-
-      -- only point's tile just does nothing useful server-side (select
-      -- on a non-control ref is rejected by the IED with a clear error).
-      widget.onTouch = function() openControlDialog(fullRef, p.type) end
+      -- A status point's control counterpart (if any -- see
+      -- model.computePointPairing) has a DIFFERENT ref, not this same
+      -- one -- status and control are separate DOI entries sharing an LN
+      -- but never a doName (see etc/sas-ied.cfg.example's XCBR1.Pos
+      -- status / XCBR1.PosCtl control). A status-only point (no
+      -- pairedFullRef) just does nothing useful server-side if clicked --
+      -- select on a non-control ref is rejected by the IED with a clear
+      -- error.
+      widget.onTouch = function() openControlDialog(p.pairedFullRef or fullRef, p.type) end
     elseif p.type == "MV" then
       local widget = mimicPanel:addChild(GUI.text(x, y, 0xFFFFFF, label .. ": --"))
       p.widget = widget
     end
     -- DPC/SPC control points themselves have no separate tile; they're
-    -- reached via their paired status point's tile (same LN, e.g.
-    -- XCBR1.Pos as both DPS status and DPC control -- see
-    -- etc/sas-ied.cfg.example).
+    -- reached via their paired status point's tile (same LN, distinct
+    -- doName -- see etc/sas-ied.cfg.example).
   end
 end
 
@@ -233,7 +235,7 @@ local function refreshMimicWidget(fullRef)
     p.widget:remove()
     local widget = mimicPanel:addChild(GUI.button(p.layoutX, p.layoutY, 16, 1, bg, 0xFFFFFF, 0x666666, 0xFFFFFF,
       label .. ": " .. tostring(p.value)))
-    widget.onTouch = function() openControlDialog(fullRef, p.type) end
+    widget.onTouch = function() openControlDialog(p.pairedFullRef or fullRef, p.type) end
     p.widget = widget
   elseif p.type == "MV" then
     -- .text reassignment IS documented ("When you change the text, its
@@ -325,7 +327,10 @@ local function connectAndLoadModel()
 
   app.points = {}
   for _, p in ipairs(modelReply.points) do
-    app.points[p.fullRef] = { ln = p.ln, doName = p.doName, type = p.type, value = nil, quality = "invalid" }
+    app.points[p.fullRef] = {
+      ln = p.ln, doName = p.doName, type = p.type, value = nil, quality = "invalid",
+      pairedFullRef = p.pairedFullRef,
+    }
   end
   buildMimic()
 

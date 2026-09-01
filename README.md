@@ -230,13 +230,16 @@ runbook, in order:
    (`sbo.timeoutSec`) and becomes selectable again.
 5. **Peer interlock.** Two IED nodes (A = `IED-BRK1`, B = `IED-BRK2`),
    both joined to the same `goose.group`, each publishing its own
-   `XCBR1.Pos` as GOOSE, with A configured with an `interlocks` rule
-   blocking `XCBR1.Pos = "closed"` while B's `XCBR1.Pos` GOOSE-sourced
-   value equals `"closed"`. Drive B's `XCBR1.Pos` to `"closed"` (real
-   redstone input); `select`+`operate` A's `XCBR1.Pos` to `"closed"` and
-   confirm the `operate-reply` comes back `ok=false` with the interlock's
-   blocking reason, and A's physical output is not pulsed. Change B's
-   value away from `"closed"` and confirm the same operate now succeeds.
+   `XCBR1.Pos` status as GOOSE, with A configured with an `interlocks`
+   rule blocking `XCBR1.PosCtl = "closed"` (the control point -- not the
+   status point of the same name, see `sas-ied.cfg.example`'s
+   `XCBR1.Pos`/`XCBR1.PosCtl` pair) while B's `XCBR1.Pos` GOOSE-sourced
+   status value equals `"closed"`. Drive B's `XCBR1.Pos` to `"closed"`
+   (real redstone input); `select`+`operate` A's `XCBR1.PosCtl` to
+   `"closed"` and confirm the `operate-reply` comes back `ok=false` with
+   the interlock's blocking reason, and A's physical output is not
+   pulsed. Change B's value away from `"closed"` and confirm the same
+   operate now succeeds.
    Then stop B's `iedd` entirely so its GOOSE goes stale past
    `gooseStaleAfterSec`, confirm A's operate is still blocked (default
    fail-safe), set `failOpen = true` on the rule, and confirm it is now
